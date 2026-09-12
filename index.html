@@ -1,720 +1,1294 @@
-<!doctype html>
-<html lang="zh-Hant">
+<!DOCTYPE html>
+<html lang="zh-TW">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>ArUco 三軸角度辨識</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #0b0f14;
-      --panel: #121923;
-      --panel2: #17212e;
-      --text: #eef4fb;
-      --muted: #9caec2;
-      --green: #35e27a;
-      --red: #ff6b6b;
-      --border: #263446;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-                   "Noto Sans TC", "PingFang TC", sans-serif;
-      background:
-        radial-gradient(circle at top, #162031 0, #0b0f14 42%),
-        var(--bg);
-      color: var(--text);
-    }
-    .wrap {
-      width: min(1100px, 100%);
-      margin: 0 auto;
-      padding: 20px;
-    }
-    h1 {
-      margin: 0 0 6px;
-      font-size: clamp(24px, 4vw, 40px);
-      letter-spacing: .02em;
-    }
-    .subtitle {
-      margin: 0 0 18px;
-      color: var(--muted);
-      line-height: 1.6;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: minmax(0, 1.55fr) minmax(280px, .85fr);
-      gap: 16px;
-      align-items: start;
-    }
-    @media (max-width: 820px) {
-      .grid { grid-template-columns: 1fr; }
-      .wrap { padding: 12px; }
-    }
-    .card {
-      background: color-mix(in srgb, var(--panel) 94%, transparent);
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      box-shadow: 0 14px 40px rgba(0,0,0,.28);
-      overflow: hidden;
-    }
-    .viewer {
-      padding: 12px;
-    }
-    .canvas-shell {
-      position: relative;
-      min-height: 260px;
-      display: grid;
-      place-items: center;
-      overflow: hidden;
-      border-radius: 13px;
-      background:
-        linear-gradient(45deg, #101721 25%, transparent 25%) 0 0/24px 24px,
-        linear-gradient(45deg, transparent 75%, #101721 75%) 0 0/24px 24px,
-        linear-gradient(45deg, transparent 75%, #101721 75%) 12px -12px/24px 24px,
-        linear-gradient(45deg, #101721 25%, #0b1017 25%) 12px 12px/24px 24px;
-      border: 1px solid #202d3d;
-    }
-    #view {
-      display: block;
-      max-width: 100%;
-      max-height: 76vh;
-      width: auto;
-      height: auto;
-    }
-    .hint {
-      position: absolute;
-      inset: auto 12px 12px 12px;
-      padding: 9px 11px;
-      border-radius: 10px;
-      background: rgba(0,0,0,.56);
-      color: #d7e1ec;
-      font-size: 13px;
-      backdrop-filter: blur(8px);
-      pointer-events: none;
-    }
-    .toolbar {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 9px;
-      padding: 12px 0 0;
-    }
-    button, .file-label {
-      appearance: none;
-      border: 1px solid #34475e;
-      background: #172333;
-      color: var(--text);
-      border-radius: 11px;
-      padding: 10px 13px;
-      font: inherit;
-      font-weight: 650;
-      cursor: pointer;
-      transition: .15s ease;
-    }
-    button:hover, .file-label:hover {
-      transform: translateY(-1px);
-      border-color: #4e6888;
-      background: #1d2c3f;
-    }
-    button.primary {
-      background: #0e6d3b;
-      border-color: #169c57;
-    }
-    button.danger {
-      background: #462226;
-      border-color: #6f343c;
-    }
-    input[type=file] { display: none; }
-    .side {
-      padding: 16px;
-    }
-    .status {
-      display: flex;
-      align-items: center;
-      gap: 9px;
-      margin-bottom: 14px;
-      color: var(--muted);
-      min-height: 24px;
-    }
-    .dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 999px;
-      background: #7f8c9b;
-      box-shadow: 0 0 0 4px rgba(127,140,155,.12);
-      flex: 0 0 auto;
-    }
-    .dot.ok {
-      background: var(--green);
-      box-shadow: 0 0 0 4px rgba(53,226,122,.12);
-    }
-    .dot.bad {
-      background: var(--red);
-      box-shadow: 0 0 0 4px rgba(255,107,107,.12);
-    }
-    .angles {
-      display: grid;
-      gap: 9px;
-      margin: 14px 0;
-    }
-    .metric {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 14px;
-      align-items: baseline;
-      padding: 12px 13px;
-      border-radius: 12px;
-      background: var(--panel2);
-      border: 1px solid #25354a;
-    }
-    .metric span {
-      color: var(--muted);
-      font-size: 14px;
-    }
-    .metric strong {
-      font-variant-numeric: tabular-nums;
-      font-size: 24px;
-    }
-    .small-metric strong { font-size: 17px; }
-    .settings {
-      margin-top: 16px;
-      padding-top: 16px;
-      border-top: 1px solid var(--border);
-      display: grid;
-      gap: 10px;
-    }
-    .field {
-      display: grid;
-      grid-template-columns: 1fr 110px;
-      gap: 10px;
-      align-items: center;
-      color: var(--muted);
-      font-size: 14px;
-    }
-    input[type=number] {
-      width: 100%;
-      color: var(--text);
-      background: #0d141d;
-      border: 1px solid #34475e;
-      border-radius: 9px;
-      padding: 9px 10px;
-      font: inherit;
-    }
-    .note {
-      margin-top: 14px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.55;
-    }
-    code {
-      background: #0b1119;
-      border: 1px solid #233145;
-      border-radius: 6px;
-      padding: 1px 5px;
-      color: #bfe8ce;
-    }
-  </style>
-
-  <!-- js-aruco2：辨識 + POSIT 姿態估計 -->
-  <script src="https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/svd.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/posit1.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/cv.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/aruco.js"></script>
-</head>
-<body>
-  <main class="wrap">
-    <h1>ArUco 三軸角度辨識</h1>
-    <p class="subtitle">
-      針對你提供的 5×5 ArUco 圖樣（ID 0）辨識。偵測成功後以綠框標出，
-      並顯示 Roll(X)、Pitch(Y)、Yaw(Z)。
-    </p>
-
-    <div class="grid">
-      <section class="card viewer">
-        <div class="canvas-shell">
-          <canvas id="view" width="640" height="480"></canvas>
-          <div class="hint" id="hint">可先按「測試這張 ArUco」，或開啟相機。</div>
-        </div>
-
-        <div class="toolbar">
-          <button class="primary" id="cameraBtn">開啟相機</button>
-          <button class="danger" id="stopBtn">停止相機</button>
-          <button id="testBtn">測試這張 ArUco</button>
-          <label class="file-label" for="fileInput">上傳圖片</label>
-          <input id="fileInput" type="file" accept="image/*" />
-        </div>
-      </section>
-
-      <aside class="card side">
-        <div class="status">
-          <span class="dot" id="statusDot"></span>
-          <span id="statusText">等待影像</span>
-        </div>
-
-        <div class="metric small-metric">
-          <span>Marker ID</span>
-          <strong id="markerId">—</strong>
-        </div>
-
-        <div class="angles">
-          <div class="metric">
-            <span>Roll · X 軸</span>
-            <strong id="roll">—</strong>
-          </div>
-          <div class="metric">
-            <span>Pitch · Y 軸</span>
-            <strong id="pitch">—</strong>
-          </div>
-          <div class="metric">
-            <span>Yaw · Z 軸</span>
-            <strong id="yaw">—</strong>
-          </div>
-        </div>
-
-        <div class="metric small-metric">
-          <span>重投影誤差</span>
-          <strong id="poseError">—</strong>
-        </div>
-
-        <div class="settings">
-          <label class="field">
-            <span>Marker 實際邊長（mm）</span>
-            <input id="markerSize" type="number" value="50" min="1" step="1" />
-          </label>
-          <label class="field">
-            <span>相機水平 FOV（°）</span>
-            <input id="fov" type="number" value="60" min="20" max="140" step="1" />
-          </label>
-        </div>
-
-        <p class="note">
-          三軸角度採 ZYX Euler 分解：Roll=X、Pitch=Y、Yaw=Z。
-          FOV 越接近你的實際鏡頭，角度估計越穩定。相機功能通常需要
-          <code>HTTPS</code> 或 <code>localhost</code>。
-        </p>
-      </aside>
-    </div>
-  </main>
-
-  <video id="video" playsinline autoplay muted hidden></video>
-  <canvas id="raw" hidden></canvas>
-  <canvas id="detect" hidden></canvas>
-
-<script>
-(() => {
-  "use strict";
-
-  const view = document.getElementById("view");
-  const vctx = view.getContext("2d");
-
-  const raw = document.getElementById("raw");
-  const rctx = raw.getContext("2d", { willReadFrequently: true });
-
-  const detectCanvas = document.getElementById("detect");
-  const dctx = detectCanvas.getContext("2d", { willReadFrequently: true });
-
-  const video = document.getElementById("video");
-  const cameraBtn = document.getElementById("cameraBtn");
-  const stopBtn = document.getElementById("stopBtn");
-  const testBtn = document.getElementById("testBtn");
-  const fileInput = document.getElementById("fileInput");
-
-  const statusDot = document.getElementById("statusDot");
-  const statusText = document.getElementById("statusText");
-  const markerIdEl = document.getElementById("markerId");
-  const rollEl = document.getElementById("roll");
-  const pitchEl = document.getElementById("pitch");
-  const yawEl = document.getElementById("yaw");
-  const poseErrorEl = document.getElementById("poseError");
-  const markerSizeEl = document.getElementById("markerSize");
-  const fovEl = document.getElementById("fov");
-  const hint = document.getElementById("hint");
-
-  const PAD = 24;
-  const MAX_W = 960;
-  const MAX_H = 720;
-  const RAD2DEG = 180 / Math.PI;
-
-  let detector = null;
-  let stream = null;
-  let cameraLoop = 0;
-  let lastAngles = null;
-  let missFrames = 0;
-
-  // 你提供的圖樣之 5×5 payload：
-  // 10100
-  // 01011
-  // 01100
-  // 10101
-  // 11100
-  // row-major = 0x145b2bc
-  const TARGET_DICT = "OPENCV_5X5_ID0";
-
-  function initDetector() {
-    if (!window.AR || !window.CV || !window.POS || !window.SVD) {
-      setStatus("辨識函式庫載入失敗，請確認網路連線", "bad");
-      return false;
-    }
-
-    AR.DICTIONARIES[TARGET_DICT] = {
-      nBits: 25,
-      tau: 3,             // 接受 Hamming distance 0~2
-      codeList: ["0x145b2bc"]
-    };
-
-    detector = new AR.Detector({
-      dictionaryName: TARGET_DICT,
-      maxHammingDistance: 3
-    });
-    return true;
-  }
-
-  function setStatus(text, type = "") {
-    statusText.textContent = text;
-    statusDot.className = "dot" + (type ? " " + type : "");
-  }
-
-  function clearReadout() {
-    markerIdEl.textContent = "—";
-    rollEl.textContent = "—";
-    pitchEl.textContent = "—";
-    yawEl.textContent = "—";
-    poseErrorEl.textContent = "—";
-  }
-
-  function setCanvasSize(sourceW, sourceH) {
-    const scale = Math.min(1, MAX_W / sourceW, MAX_H / sourceH);
-    const w = Math.max(1, Math.round(sourceW * scale));
-    const h = Math.max(1, Math.round(sourceH * scale));
-
-    if (raw.width !== w || raw.height !== h) {
-      raw.width = w;
-      raw.height = h;
-      view.width = w;
-      view.height = h;
-      detectCanvas.width = w + PAD * 2;
-      detectCanvas.height = h + PAD * 2;
-      lastAngles = null;
-    }
-    return { w, h };
-  }
-
-  function processRawFrame() {
-    if (!detector && !initDetector()) return;
-
-    // 偵測用影像外加白邊：即使 ArUco 剛好貼齊圖片邊緣，也比較容易抓到外框。
-    dctx.fillStyle = "#fff";
-    dctx.fillRect(0, 0, detectCanvas.width, detectCanvas.height);
-    dctx.drawImage(raw, PAD, PAD);
-
-    let markers = [];
-    try {
-      const imageData = dctx.getImageData(0, 0, detectCanvas.width, detectCanvas.height);
-      markers = detector.detect(imageData);
-    } catch (err) {
-      console.error(err);
-      setStatus("辨識時發生錯誤：" + err.message, "bad");
-      return;
-    }
-
-    // 先畫原始畫面，再疊加綠框。
-    vctx.clearRect(0, 0, view.width, view.height);
-    vctx.drawImage(raw, 0, 0);
-
-    if (!markers.length) {
-      missFrames++;
-      if (missFrames > 8) lastAngles = null;
-      clearReadout();
-      setStatus("未偵測到指定 ArUco", "");
-      return;
-    }
-
-    missFrames = 0;
-
-    // 這份頁面只針對單一目標 marker，因此取第一個。
-    const marker = markers[0];
-    const corners = marker.corners.map(p => ({ x: p.x - PAD, y: p.y - PAD }));
-
-    const poseResult = estimatePose(corners);
-    drawMarkerOverlay(corners, marker, poseResult);
-
-    markerIdEl.textContent = String(marker.id);
-    setStatus("已辨識到 ArUco", "ok");
-
-    if (poseResult) {
-      const { roll, pitch, yaw, error } = poseResult;
-      rollEl.textContent = roll.toFixed(1) + "°";
-      pitchEl.textContent = pitch.toFixed(1) + "°";
-      yawEl.textContent = yaw.toFixed(1) + "°";
-      poseErrorEl.textContent = Number.isFinite(error) ? error.toFixed(1) + " px" : "—";
-    }
-  }
-
-  function estimatePose(corners) {
-    try {
-      const markerSize = Math.max(1, Number(markerSizeEl.value) || 50);
-      const hfovDeg = Math.min(140, Math.max(20, Number(fovEl.value) || 60));
-      const focal = view.width / (2 * Math.tan((hfovDeg * Math.PI / 180) / 2));
-
-      const centered = corners.map(p => ({
-        x: p.x - view.width / 2,
-        y: view.height / 2 - p.y
-      }));
-
-      const posit = new POS.Posit(markerSize, focal);
-      const pose = posit.pose(centered);
-      if (!pose || !pose.bestRotation) return null;
-
-      let angles = rotationToEulerZYX(pose.bestRotation);
-      angles = smoothEuler(angles, 0.24);
-
-      return {
-        ...angles,
-        error: Number(pose.bestError)
-      };
-    } catch (err) {
-      console.error("Pose error:", err);
-      return null;
-    }
-  }
-
-  // R = Rz(yaw) * Ry(pitch) * Rx(roll)
-  function rotationToEulerZYX(R) {
-    const sy = Math.hypot(R[0][0], R[1][0]);
-    const singular = sy < 1e-6;
-
-    let roll, pitch, yaw;
-
-    if (!singular) {
-      roll = Math.atan2(R[2][1], R[2][2]);
-      pitch = Math.atan2(-R[2][0], sy);
-      yaw = Math.atan2(R[1][0], R[0][0]);
-    } else {
-      roll = Math.atan2(-R[1][2], R[1][1]);
-      pitch = Math.atan2(-R[2][0], sy);
-      yaw = 0;
-    }
-
-    return {
-      roll: normalizeDeg(roll * RAD2DEG),
-      pitch: normalizeDeg(pitch * RAD2DEG),
-      yaw: normalizeDeg(yaw * RAD2DEG)
-    };
-  }
-
-  function normalizeDeg(v) {
-    while (v > 180) v -= 360;
-    while (v <= -180) v += 360;
-    return v;
-  }
-
-  function smoothOne(prev, next, alpha) {
-    if (!Number.isFinite(prev)) return next;
-    let delta = normalizeDeg(next - prev);
-    return normalizeDeg(prev + delta * alpha);
-  }
-
-  function smoothEuler(next, alpha) {
-    if (!lastAngles) {
-      lastAngles = { ...next };
-      return next;
-    }
-    lastAngles = {
-      roll: smoothOne(lastAngles.roll, next.roll, alpha),
-      pitch: smoothOne(lastAngles.pitch, next.pitch, alpha),
-      yaw: smoothOne(lastAngles.yaw, next.yaw, alpha)
-    };
-    return { ...lastAngles };
-  }
-
-  function drawMarkerOverlay(corners, marker, poseResult) {
-    if (!corners.length) return;
-
-    vctx.save();
-
-    // 綠框
-    vctx.strokeStyle = "#35e27a";
-    vctx.lineWidth = Math.max(3, view.width / 260);
-    vctx.lineJoin = "round";
-    vctx.beginPath();
-    vctx.moveTo(corners[0].x, corners[0].y);
-    for (let i = 1; i < corners.length; i++) {
-      vctx.lineTo(corners[i].x, corners[i].y);
-    }
-    vctx.closePath();
-    vctx.stroke();
-
-    // 四角點
-    vctx.fillStyle = "#35e27a";
-    for (const p of corners) {
-      vctx.beginPath();
-      vctx.arc(p.x, p.y, Math.max(3, view.width / 220), 0, Math.PI * 2);
-      vctx.fill();
-    }
-
-    // 資訊標籤
-    let text = "ID " + marker.id;
-    if (poseResult) {
-      text += `  X ${poseResult.roll.toFixed(1)}°  Y ${poseResult.pitch.toFixed(1)}°  Z ${poseResult.yaw.toFixed(1)}°`;
-    }
-
-    const fontSize = Math.max(14, Math.min(26, view.width / 32));
-    vctx.font = `700 ${fontSize}px ui-monospace, SFMono-Regular, Menlo, monospace`;
-    const pad = Math.round(fontSize * 0.45);
-    const metrics = vctx.measureText(text);
-    const boxW = metrics.width + pad * 2;
-    const boxH = fontSize + pad * 1.5;
-
-    const minX = Math.min(...corners.map(p => p.x));
-    const minY = Math.min(...corners.map(p => p.y));
-    const x = Math.max(4, Math.min(view.width - boxW - 4, minX));
-    const y = Math.max(boxH + 4, minY - 8);
-
-    vctx.fillStyle = "rgba(0,0,0,.72)";
-    roundRect(vctx, x, y - boxH, boxW, boxH, 8);
-    vctx.fill();
-
-    vctx.fillStyle = "#68f09a";
-    vctx.textBaseline = "middle";
-    vctx.fillText(text, x + pad, y - boxH / 2);
-
-    vctx.restore();
-  }
-
-  function roundRect(ctx, x, y, w, h, r) {
-    r = Math.min(r, w / 2, h / 2);
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.arcTo(x + w, y, x + w, y + h, r);
-    ctx.arcTo(x + w, y + h, x, y + h, r);
-    ctx.arcTo(x, y + h, x, y, r);
-    ctx.arcTo(x, y, x + w, y, r);
-    ctx.closePath();
-  }
-
-  async function startCamera() {
-    stopCamera();
-
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setStatus("此瀏覽器不支援相機 API", "bad");
-      return;
-    }
-
-    try {
-      setStatus("正在取得相機權限…", "");
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        },
-        audio: false
-      });
-
-      video.srcObject = stream;
-      await video.play();
-
-      hint.style.display = "none";
-      setStatus("相機已開啟，請將 ArUco 放入畫面", "");
-      lastAngles = null;
-
-      const tick = () => {
-        if (!stream) return;
-        if (video.readyState >= 2 && video.videoWidth && video.videoHeight) {
-          const { w, h } = setCanvasSize(video.videoWidth, video.videoHeight);
-          rctx.clearRect(0, 0, w, h);
-          rctx.drawImage(video, 0, 0, w, h);
-          processRawFrame();
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Micro:bit AI 視覺自駕控制器</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            overscroll-behavior-y: contain;
+            touch-action: none;
+            background-color: #0b0f0c;
+            color: #e6f0e8;
+            font-family: "IBM Plex Sans TC", system-ui, sans-serif;
         }
-        cameraLoop = requestAnimationFrame(tick);
-      };
-      tick();
-    } catch (err) {
-      console.error(err);
-      let msg = "無法開啟相機";
-      if (!window.isSecureContext) {
-        msg += "；請用 HTTPS 或 localhost 開啟此頁";
-      } else if (err && err.message) {
-        msg += "：" + err.message;
-      }
-      setStatus(msg, "bad");
-    }
-  }
+        
+        /* Joystick Styles */
+        .joystick-container {
+            position: relative;
+            width: 120px;
+            height: 120px;
+            background-color: #233127;
+            border-radius: 50%;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
+            border: 2px solid #1a231d;
+        }
+        .joystick-knob {
+            position: absolute;
+            width: 50px;
+            height: 50px;
+            background-color: #22e07a;
+            border-radius: 50%;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .joystick-knob:active { background-color: #1bb562; }
 
-  function stopCamera() {
-    if (cameraLoop) {
-      cancelAnimationFrame(cameraLoop);
-      cameraLoop = 0;
-    }
-    if (stream) {
-      stream.getTracks().forEach(t => t.stop());
-      stream = null;
-    }
-    video.srcObject = null;
-  }
+        /* Camera Stage Styles */
+        .stage {
+            position: relative;
+            background: #000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            border: 1px solid #233127;
+            border-radius: 0.5rem;
+            aspect-ratio: 4/3;
+            width: 100%;
+            max-height: 50vh;
+            cursor: crosshair;
+        }
+        .stage video, .stage canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+        #overlay { pointer-events: none; z-index: 10; }
+        
+        /* Custom UI Elements */
+        .panel { background: #121814; border: 1px solid #233127; }
+        .data-readout { font-family: "IBM Plex Mono", monospace; }
+        
+        /* Fullscreen Stage */
+        .stage-fullscreen {
+            position: fixed !important;
+            top: 0 !important;
+            left: 0 !important;
+            width: 100vw !important;
+            height: 100vh !important;
+            max-height: none !important;
+            z-index: 9999 !important;
+            border-radius: 0 !important;
+            border: none !important;
+            aspect-ratio: auto !important;
+        }
 
-  function loadImage(src) {
-    stopCamera();
-    const img = new Image();
-    img.onload = () => {
-      const { w, h } = setCanvasSize(img.naturalWidth, img.naturalHeight);
-      rctx.fillStyle = "#fff";
-      rctx.fillRect(0, 0, w, h);
-      rctx.drawImage(img, 0, 0, w, h);
-      hint.style.display = "none";
-      lastAngles = null;
-      processRawFrame();
-    };
-    img.onerror = () => setStatus("圖片載入失敗", "bad");
-    img.src = src;
-  }
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #0b0f0c; }
+        ::-webkit-scrollbar-thumb { background: #233127; border-radius: 4px; }
+    </style>
+</head>
+<body class="flex flex-col h-screen">
 
-  cameraBtn.addEventListener("click", startCamera);
-  stopBtn.addEventListener("click", () => {
-    stopCamera();
-    setStatus("相機已停止", "");
-  });
+    <header class="bg-gray-900 border-b border-green-900/50 text-white p-3 shadow-md flex flex-wrap justify-between items-center gap-2 z-20 relative">
+        <div>
+            <h1 class="text-lg font-bold tracking-wide text-green-400">Micro:bit 視覺自駕</h1>
+            <div id="cvStatus" class="text-xs text-gray-400 font-mono flex items-center gap-1">
+                <span class="w-2 h-2 rounded-full bg-yellow-500 inline-block animate-pulse" id="cvDot"></span>
+                載入 OpenCV.js...
+            </div>
+        </div>
+        <div class="flex gap-2">
+            <button id="btnCam" class="bg-gray-800 border border-gray-600 text-gray-200 px-3 py-1.5 rounded text-sm hover:bg-gray-700 transition">
+                啟動相機
+            </button>
+            <button id="connectBtn" class="bg-blue-600/20 border border-blue-500 text-blue-400 px-4 py-1.5 rounded font-semibold hover:bg-blue-600/30 transition shadow">
+                連接藍牙
+            </button>
+        </div>
+    </header>
 
-  testBtn.addEventListener("click", () => {
-    loadImage("data:image/png;base64,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");
-  });
+    <main class="flex-1 flex flex-col md:flex-row overflow-hidden relative">
+        
+        <!-- Left: Camera & Auto Control -->
+        <div class="flex-1 flex flex-col p-2 gap-2 overflow-y-auto">
+            <!-- Camera Stage -->
+            <div class="stage" id="stageContainer">
+                <button id="btnFullscreen" class="absolute top-2 left-2 bg-gray-800/80 border border-gray-500 text-white px-3 py-1 rounded text-sm z-30 hover:bg-gray-700 transition cursor-pointer">全螢幕</button>
+                <div class="absolute top-2 right-2 flex gap-2 z-30">
+                    <button id="btnAutoStartOverlay" disabled class="bg-green-600/80 border border-green-500 text-white px-3 py-1 rounded text-sm opacity-50 cursor-not-allowed transition hover:bg-green-500 disabled:hover:bg-green-600/80 cursor-pointer shadow-lg shadow-black/50">開始</button>
+                    <button id="btnAutoStopOverlay" disabled class="bg-red-600/80 border border-red-500 text-white px-3 py-1 rounded text-sm opacity-50 cursor-not-allowed transition hover:bg-red-500 disabled:hover:bg-red-600/80 cursor-pointer shadow-lg shadow-black/50">停止</button>
+                </div>
+                <video id="video" playsinline muted></video>
+                <canvas id="overlay"></canvas>
+                <div class="absolute bottom-2 left-2 text-xs text-gray-300 bg-black/60 px-2 py-1 rounded font-mono border border-gray-700 pointer-events-none" id="btStatus">
+                    藍牙未連線
+                </div>
+            </div>
 
-  fileInput.addEventListener("change", () => {
-    const file = fileInput.files && fileInput.files[0];
-    if (!file) return;
-    const url = URL.createObjectURL(file);
-    stopCamera();
-    const img = new Image();
-    img.onload = () => {
-      const { w, h } = setCanvasSize(img.naturalWidth, img.naturalHeight);
-      rctx.drawImage(img, 0, 0, w, h);
-      hint.style.display = "none";
-      lastAngles = null;
-      processRawFrame();
-      URL.revokeObjectURL(url);
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      setStatus("圖片載入失敗", "bad");
-    };
-    img.src = url;
-  });
+            <!-- Auto Control Panel -->
+            <div class="panel rounded-lg p-3 flex flex-col gap-3">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-green-400 font-semibold text-sm">自動導航控制</h2>
+                    <span id="targetStatus" class="text-xs text-gray-400">連續點擊畫面可建立多點路徑</span>
+                </div>
+                
+                <div class="flex gap-2">
+                    <button id="btnAutoStart" disabled class="flex-1 bg-green-600/20 border border-green-500 text-green-400 py-2 rounded font-medium opacity-50 cursor-not-allowed transition hover:bg-green-600/30 disabled:hover:bg-green-600/20 text-sm px-1">
+                        開始
+                    </button>
+                    <button id="btnAutoStop" disabled class="flex-1 bg-red-600/20 border border-red-500 text-red-400 py-2 rounded font-medium opacity-50 cursor-not-allowed transition hover:bg-red-600/30 disabled:hover:bg-red-600/20 text-sm px-1">
+                        停止
+                    </button>
+                    <button id="btnViewHistory" class="flex-1 bg-blue-600/20 border border-blue-500 text-blue-400 py-2 rounded font-medium transition hover:bg-blue-600/30 text-sm px-1">
+                        觀看歷程
+                    </button>
+                </div>
 
-  markerSizeEl.addEventListener("change", () => { lastAngles = null; });
-  fovEl.addEventListener("change", () => { lastAngles = null; });
+                <div class="grid grid-cols-2 gap-2">
+                    <button id="btnUndoWaypoint" disabled class="bg-yellow-600/10 border border-yellow-700/70 text-yellow-400 py-1.5 rounded text-xs opacity-50 cursor-not-allowed transition hover:bg-yellow-600/20">復原上一點</button>
+                    <button id="btnClearRoute" disabled class="bg-red-600/10 border border-red-800 text-red-400 py-1.5 rounded text-xs opacity-50 cursor-not-allowed transition hover:bg-red-600/20">清除路徑</button>
+                </div>
+                
+                <div class="text-xs text-gray-400 bg-black/30 p-2 rounded data-readout flex justify-between gap-2 flex-wrap">
+                    <div>輸出字串: <span id="debugString" class="text-green-300">SRV1500150015001500#</span></div>
+                    <div>模式: <span id="modeDisplay" class="text-blue-300">手動</span></div>
+                </div>
 
-  // 初始畫面
-  vctx.fillStyle = "#0c121a";
-  vctx.fillRect(0, 0, view.width, view.height);
-  vctx.fillStyle = "#7f92a8";
-  vctx.textAlign = "center";
-  vctx.textBaseline = "middle";
-  vctx.font = "600 20px system-ui, sans-serif";
-  vctx.fillText("ArUco 5×5 · ID 0", view.width / 2, view.height / 2);
+                <!-- 視覺辨識來源切換：ArUco+LED / ArUco / LED -->
+                <div class="border-t border-gray-800 pt-3 flex flex-col gap-2">
+                    <div class="flex justify-between items-center text-xs">
+                        <span class="text-gray-400">方向辨識來源</span>
+                        <span id="visionModeStatus" class="text-cyan-300 data-readout">ArUco + LED</span>
+                    </div>
+                    <div class="grid grid-cols-3 gap-2">
+                        <button id="btnVisionBoth" class="vision-mode-btn bg-cyan-600/25 border border-cyan-400 text-cyan-300 py-1.5 px-2 rounded text-xs font-medium transition">ArUco + LED</button>
+                        <button id="btnVisionAruco" class="vision-mode-btn bg-gray-900 border border-gray-700 text-gray-400 py-1.5 px-2 rounded text-xs font-medium transition hover:border-green-500">僅 ArUco</button>
+                        <button id="btnVisionLed" class="vision-mode-btn bg-gray-900 border border-gray-700 text-gray-400 py-1.5 px-2 rounded text-xs font-medium transition hover:border-red-500">僅 LED</button>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 text-xs data-readout bg-black/30 p-2 rounded border border-gray-800">
+                        <div>LED: <b id="ledStatus" class="text-gray-500">等待相機</b></div>
+                        <div class="text-right">方向: <b id="ledAngle" class="text-orange-300">—</b></div>
+                    </div>
+                    <div class="flex items-center gap-3 text-[11px] text-gray-500">
+                        <label>紅光門檻 <input id="ledRThreshold" type="number" min="80" max="250" value="140" class="w-14 bg-black border border-gray-700 text-center rounded ml-1"></label>
+                        <label>色差 <input id="ledDominance" type="number" min="10" max="120" value="30" class="w-14 bg-black border border-gray-700 text-center rounded ml-1"></label>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- ArUco Data (Hidden on small screens to save space, but kept for full functionality) -->
+            <div class="panel rounded-lg p-3 hidden sm:flex flex-col gap-2 text-xs data-readout text-gray-400">
+                <div class="flex justify-between"><span>ArUco ID: <b id="idOut" class="text-green-400 text-sm">—</b></span> <span id="vd">—</span></div>
+                <div class="grid grid-cols-3 gap-2 text-center">
+                    <div class="bg-black/30 p-1 rounded border border-gray-800">Roll(X)<br><b id="vx" class="text-red-400">—</b></div>
+                    <div class="bg-black/30 p-1 rounded border border-gray-800">Pitch(Y)<br><b id="vy" class="text-green-400">—</b></div>
+                    <div class="bg-black/30 p-1 rounded border border-gray-800">Yaw(Z)<br><b id="vz" class="text-blue-400">—</b></div>
+                </div>
+                <div class="text-gray-500 mt-1">設定: FOV <input type="number" id="fov" value="60" class="w-12 bg-black border border-gray-700 text-center rounded ml-1">°, 尺寸 <input type="number" id="msize" value="50" class="w-12 bg-black border border-gray-700 text-center rounded ml-1">mm</div>
+            </div>
+        </div>
 
-  window.addEventListener("beforeunload", stopCamera);
-})();
-</script>
+        <!-- Right: Manual Joysticks -->
+        <div class="w-full md:w-80 panel md:border-l md:border-t-0 border-t border-green-900/50 p-4 flex flex-row md:flex-col justify-around items-center gap-6 z-10">
+            <!-- 左搖桿 (上下油門) -->
+            <div class="flex flex-col items-center">
+                <span class="mb-3 font-semibold text-gray-400 text-sm">左手 (油門前後)</span>
+                <div id="leftJoystick" class="joystick-container">
+                    <div id="leftKnob" class="joystick-knob"></div>
+                </div>
+                <div class="mt-3 text-sm text-green-400 data-readout bg-black/40 px-3 py-1 rounded border border-gray-800" id="leftValDisplay">1500</div>
+            </div>
+
+            <!-- 右搖桿 (左右方向) -->
+            <div class="flex flex-col items-center">
+                <span class="mb-3 font-semibold text-gray-400 text-sm">右手 (左右轉向)</span>
+                <div id="rightJoystick" class="joystick-container">
+                    <div id="rightKnob" class="joystick-knob"></div>
+                </div>
+                <div class="mt-3 text-sm text-green-400 data-readout bg-black/40 px-3 py-1 rounded border border-gray-800" id="rightValDisplay">1500</div>
+            </div>
+        </div>
+
+    </main>
+
+    <!-- 歷程紀錄 Modal (預設隱藏) -->
+    <div id="historyModal" class="fixed inset-0 bg-black/80 z-[10000] hidden flex items-center justify-center p-4">
+        <div class="bg-[#121814] border border-[#233127] rounded-lg w-full max-w-lg flex flex-col max-h-[80vh] shadow-2xl shadow-green-900/20">
+            <div class="flex justify-between items-center p-3 border-b border-[#233127]">
+                <h3 class="text-green-400 font-bold tracking-wide">自動導航指令歷程</h3>
+                <button id="btnCloseHistory" class="text-gray-400 hover:text-white text-2xl leading-none cursor-pointer">&times;</button>
+            </div>
+            <div class="p-3 overflow-y-auto flex-1 font-mono text-xs space-y-1 bg-black/50 min-h-[250px]" id="historyContent">
+                <!-- 紀錄內容插入點 -->
+            </div>
+            <div class="p-3 border-t border-[#233127] flex justify-between items-center bg-black/30">
+                <span class="text-xs text-gray-500" id="historyCount">共 0 筆紀錄</span>
+                <button id="btnClearHistory" class="text-xs bg-red-900/30 border border-red-800 text-red-400 px-3 py-1.5 rounded hover:bg-red-900/60 transition cursor-pointer">清除紀錄</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 藍牙變數設定 ---
+        const UART_SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+        const UART_RX_UUID      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+        let bluetoothDevice = null;
+        let rxCharacteristic = null;
+        let isConnected = false;
+        let sendInterval = null;
+
+        // --- 控制變數 ---
+        let steeringVal = 1500; // CH1: 方向 (右手左右)
+        let throttleVal = 1500; // CH2: 油門 (左手上下)
+        let ch3Val = 1500;      // 預留
+        let ch4Val = 1500;      // 預留
+
+        // --- 自動控制變數 ---
+        let autoMode = false;
+        let routePoints = [];       // 使用者依序點選的完整導航路徑 [{x,y}, ...]
+        let currentRouteIndex = 0;  // 目前正在前往的路徑點索引
+        let routeCompleted = false; // 是否已完成整條路徑
+        let targetPoint = null;     // 相容原導航邏輯：永遠指向目前路徑點
+        let carScreenPos = null;    // {x, y} 車子中心在 canvas 上的座標
+        let carMissingFrames = 0;   // 記錄失去目標的幀數
+        const WAYPOINT_REACHED_PX = 40;
+
+        // --- 視覺辨識模式與 LED 方向追蹤 ---
+        // both = ArUco 位置 + LED 方向（任一遺失時自動退回另一來源）
+        // aruco = 僅使用 ArUco；led = 僅使用 LED 5x5 圖形
+        let visionMode = 'both';
+        let lastLedPose = null;
+        const LED_SMOOTH_ALPHA = 0.35;
+
+        // --- 歷程紀錄變數 ---
+        let commandHistory = [];
+        let isRecording = false;
+        let lastRecordedCmd = "";
+
+        // --- DOM Elements ---
+        const $ = id => document.getElementById(id);
+        const connectBtn = $('connectBtn');
+        const btStatus = $('btStatus');
+        const debugString = $('debugString');
+        const modeDisplay = $('modeDisplay');
+        const btnAutoStart = $('btnAutoStart');
+        const btnAutoStop = $('btnAutoStop');
+        const btnAutoStartOverlay = $('btnAutoStartOverlay');
+        const btnAutoStopOverlay = $('btnAutoStopOverlay');
+        const targetStatus = $('targetStatus');
+        const stageContainer = $('stageContainer');
+        const btnUndoWaypoint = $('btnUndoWaypoint');
+        const btnClearRoute = $('btnClearRoute');
+        const btnVisionBoth = $('btnVisionBoth');
+        const btnVisionAruco = $('btnVisionAruco');
+        const btnVisionLed = $('btnVisionLed');
+        const visionModeStatus = $('visionModeStatus');
+        const ledStatus = $('ledStatus');
+        const ledAngle = $('ledAngle');
+
+        function setVisionMode(mode) {
+            visionMode = mode;
+            lastLedPose = null;
+            carMissingFrames = 0;
+
+            const inactive = 'vision-mode-btn bg-gray-900 border border-gray-700 text-gray-400 py-1.5 px-2 rounded text-xs font-medium transition hover:border-gray-500';
+            btnVisionBoth.className = inactive;
+            btnVisionAruco.className = inactive;
+            btnVisionLed.className = inactive;
+
+            if(mode === 'both') {
+                btnVisionBoth.className = 'vision-mode-btn bg-cyan-600/25 border border-cyan-400 text-cyan-300 py-1.5 px-2 rounded text-xs font-medium transition';
+                visionModeStatus.textContent = 'ArUco + LED';
+                visionModeStatus.className = 'text-cyan-300 data-readout';
+            } else if(mode === 'aruco') {
+                btnVisionAruco.className = 'vision-mode-btn bg-green-600/20 border border-green-500 text-green-300 py-1.5 px-2 rounded text-xs font-medium transition';
+                visionModeStatus.textContent = '僅 ArUco';
+                visionModeStatus.className = 'text-green-300 data-readout';
+                ledStatus.textContent = '已停用';
+                ledStatus.className = 'text-gray-500';
+                ledAngle.textContent = '—';
+            } else {
+                btnVisionLed.className = 'vision-mode-btn bg-red-600/20 border border-red-500 text-red-300 py-1.5 px-2 rounded text-xs font-medium transition';
+                visionModeStatus.textContent = '僅 LED';
+                visionModeStatus.className = 'text-red-300 data-readout';
+            }
+        }
+
+        btnVisionBoth.addEventListener('click', () => setVisionMode('both'));
+        btnVisionAruco.addEventListener('click', () => setVisionMode('aruco'));
+        btnVisionLed.addEventListener('click', () => setVisionMode('led'));
+
+        setRouteButtonState();
+
+        // ==========================================
+        // 全螢幕切換邏輯
+        // ==========================================
+        const btnFullscreen = $('btnFullscreen');
+        let isFullscreen = false;
+        btnFullscreen.addEventListener('click', (e) => {
+            e.stopPropagation(); // 避免點擊按鈕時觸發畫布設定目標點
+            isFullscreen = !isFullscreen;
+            if(isFullscreen) {
+                stageContainer.classList.add('stage-fullscreen');
+                btnFullscreen.textContent = '回復';
+            } else {
+                stageContainer.classList.remove('stage-fullscreen');
+                btnFullscreen.textContent = '全螢幕';
+            }
+        });
+
+        // ==========================================
+        // 1. 藍牙連線邏輯
+        // ==========================================
+        connectBtn.addEventListener('click', async () => {
+            if (isConnected) disconnectDevice();
+            else connectDevice();
+        });
+
+        async function connectDevice() {
+            if (!navigator.bluetooth) {
+                alert("瀏覽器不支援 Web Bluetooth API");
+                return;
+            }
+            try {
+                btStatus.textContent = "請求藍牙裝置...";
+                bluetoothDevice = await navigator.bluetooth.requestDevice({
+                    filters: [{ namePrefix: 'BBC micro:bit' }, { services: [UART_SERVICE_UUID] }],
+                    optionalServices: [UART_SERVICE_UUID]
+                });
+                bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
+                btStatus.textContent = "連線中...";
+                const server = await bluetoothDevice.gatt.connect();
+                const service = await server.getPrimaryService(UART_SERVICE_UUID);
+                rxCharacteristic = await service.getCharacteristic(UART_RX_UUID);
+                
+                isConnected = true;
+                connectBtn.textContent = '斷開藍牙';
+                connectBtn.className = 'bg-red-600/20 border border-red-500 text-red-400 px-4 py-1.5 rounded font-semibold hover:bg-red-600/30 transition shadow';
+                btStatus.textContent = "藍牙已連線";
+                btStatus.classList.replace('text-gray-300', 'text-blue-400');
+                
+                startSendingData();
+            } catch (error) {
+                console.error(error);
+                btStatus.textContent = "連線失敗";
+                isConnected = false;
+            }
+        }
+
+        function disconnectDevice() {
+            if (bluetoothDevice && bluetoothDevice.gatt.connected) bluetoothDevice.gatt.disconnect();
+        }
+
+        function onDisconnected() {
+            isConnected = false;
+            rxCharacteristic = null;
+            connectBtn.textContent = '連接藍牙';
+            connectBtn.className = 'bg-blue-600/20 border border-blue-500 text-blue-400 px-4 py-1.5 rounded font-semibold hover:bg-blue-600/30 transition shadow';
+            btStatus.textContent = "藍牙已斷線";
+            btStatus.classList.replace('text-blue-400', 'text-gray-300');
+            stopSendingData();
+            disableAutoMode();
+        }
+
+        function formatCommand() {
+            const pad = (num) => Math.max(1000, Math.min(2000, Math.round(num))).toString().padStart(4, '0');
+            return `SRV${pad(steeringVal)}${pad(throttleVal)}${pad(ch3Val)}${pad(ch4Val)}#`;
+        }
+
+        async function sendDataToMicrobit() {
+            const command = formatCommand();
+            debugString.textContent = command;
+            
+            // 紀錄指令 (若處於自動模式且指令有變化)
+            if (isRecording) {
+                if (command !== lastRecordedCmd) {
+                    const now = new Date();
+                    const ms = now.getMilliseconds().toString().padStart(3, '0');
+                    const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}.${ms}`;
+                    commandHistory.push({ time: timeStr, cmd: command });
+                    lastRecordedCmd = command;
+                }
+            }
+
+            if (!isConnected || !rxCharacteristic) return;
+            try {
+                let encoder = new TextEncoder('utf-8');
+                await rxCharacteristic.writeValueWithoutResponse(encoder.encode(command));
+            } catch (e) {}
+        }
+
+        function startSendingData() {
+            if (sendInterval) clearInterval(sendInterval);
+            sendInterval = setInterval(sendDataToMicrobit, 100); 
+        }
+        function stopSendingData() {
+            if (sendInterval) clearInterval(sendInterval);
+            sendInterval = null;
+        }
+
+        // ==========================================
+        // 2. 搖桿控制邏輯
+        // ==========================================
+        function setupJoystick(containerId, knobId, axis, callback) {
+            const container = $(containerId), knob = $(knobId);
+            let isDragging = false;
+            let activeTouchId = null;
+
+            function updateKnobPosition(clientX, clientY) {
+                if (autoMode) return; // 自動模式下忽略搖桿
+                const rect = container.getBoundingClientRect();
+                const maxRadius = (container.offsetWidth - knob.offsetWidth) / 2;
+                const centerX = container.offsetWidth / 2, centerY = container.offsetHeight / 2;
+                let dx = clientX - rect.left - centerX;
+                let dy = clientY - rect.top - centerY;
+
+                if (axis === 'y') dx = 0; else if (axis === 'x') dy = 0;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                if (dist > maxRadius) { dx *= maxRadius/dist; dy *= maxRadius/dist; }
+                
+                knob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+                let val = 1500;
+                if (axis === 'y') val = 1500 - (dy / maxRadius) * 500;
+                else if (axis === 'x') val = 1500 + (dx / maxRadius) * 500;
+                callback(val);
+            }
+
+            function resetKnob() {
+                if (autoMode) return;
+                knob.style.transform = `translate(-50%, -50%)`;
+                callback(1500);
+            }
+
+            // Mouse
+            knob.addEventListener('mousedown', (e) => { if(!autoMode){isDragging = true; e.preventDefault();} });
+            document.addEventListener('mousemove', (e) => { if (isDragging) updateKnobPosition(e.clientX, e.clientY); });
+            document.addEventListener('mouseup', () => { if (isDragging) { isDragging = false; resetKnob(); } });
+
+            // Touch
+            container.addEventListener('touchstart', e => {
+                if(autoMode) return;
+                e.preventDefault();
+                for (let i = 0; i < e.changedTouches.length; i++) {
+                    const t = e.changedTouches[i];
+                    const target = document.elementFromPoint(t.clientX, t.clientY);
+                    if (target === container || target === knob || activeTouchId === t.identifier) {
+                        activeTouchId = t.identifier;
+                        updateKnobPosition(t.clientX, t.clientY);
+                    }
+                }
+            }, {passive: false});
+            
+            container.addEventListener('touchmove', e => {
+                if(autoMode) return;
+                e.preventDefault();
+                for (let i = 0; i < e.changedTouches.length; i++) {
+                    if (e.changedTouches[i].identifier === activeTouchId) updateKnobPosition(e.changedTouches[i].clientX, e.changedTouches[i].clientY);
+                }
+            }, {passive: false});
+
+            const handleEnd = e => {
+                for (let i = 0; i < e.changedTouches.length; i++) {
+                    if (e.changedTouches[i].identifier === activeTouchId) {
+                        activeTouchId = null;
+                        resetKnob();
+                    }
+                }
+            };
+            container.addEventListener('touchend', handleEnd);
+            container.addEventListener('touchcancel', handleEnd);
+        }
+
+        setupJoystick('leftJoystick', 'leftKnob', 'y', (val) => {
+            if(!autoMode) { throttleVal = Math.round(val); $('leftValDisplay').textContent = throttleVal; if(!isConnected) debugString.textContent = formatCommand(); }
+        });
+        setupJoystick('rightJoystick', 'rightKnob', 'x', (val) => {
+            if(!autoMode) { steeringVal = Math.round(val); $('rightValDisplay').textContent = steeringVal; if(!isConnected) debugString.textContent = formatCommand(); }
+        });
+
+
+        // ==========================================
+        // 3. ArUco 字典與 OpenCV 初始化
+        // ==========================================
+        const DICT = ["1010001011011001010111100", "0000111000000011011100110", "1101011110000111011011101", "1000000111001010111110111", "1101011101011010100100100", "1110101000000100000101101", "0110100111101011111101100", "0111000100001010001101011", "1000011010110000100110010", "1001100010011111110100101", "1001111001110111000000011", "1101000101101101011000000", "1111001100010101100010001", "0010111100111000101100110", "1111111001111110010101000", "0010100011110001101111111", "0100101111010011101011000", "0101111101010001001101111", "0111101100100110111000100", "1000001100001110111101000", "1001011011101101001110101", "1010100001110010001000000", "1011010110000110010100001", "0101110100001001011011110", "1100111001101000000100011", "1101001011001100101110010", "1110000111100111010001011", "0001000100100001001000110", "0001110111001011001110010", "0001001000010001000111011", "0001001110011011101101110", "0001101101000100001110011", "0010000001101000011001110", "0010010101010101011001000", "0010001100100001110111010", "0011110100110111111101010", "0100110011000101010101100", "0100000101101000100000001", "0100110101010110100011101", "0100001100011110001110010", "0101011010010100000100101", "0101001010010111110011110", "0110110000100100111110111", "0110000110000100111011001", "0110110100111111000110001", "0111010010110001001111010", "0111010011011100110010111", "0111110010100100000000110", "0111101011001000100100101", "0111101101011011111010111"];
+        const MAX_ERR_BITS = 2;
+        
+        function rot90(s){ let o=''; for(let c=0;c<5;c++) for(let r=4;r>=0;r--) o+=s[r*5+c]; return o; }
+        function hamming(a,b){ let d=0; for(let i=0;i<25;i++) if(a[i]!==b[i]) d++; return d; }
+        function matchDict(bits){
+            let best=null, cur=bits;
+            for(let k=0;k<4;k++){
+                for(let id=0;id<DICT.length;id++){
+                    const d=hamming(cur,DICT[id]);
+                    if(d<=MAX_ERR_BITS && (!best||d<best.dist)) best={id,rot:k,dist:d};
+                }
+                cur=rot90(cur);
+            }
+            return best;
+        }
+
+        const video=$('video'), overlay=$('overlay'), ctx=overlay.getContext('2d');
+        let cvReady=false, procCanvas=document.createElement('canvas'), pctx=procCanvas.getContext('2d',{willReadFrequently:true});
+        const PROC_W=640;
+
+        const s=document.createElement('script');
+        s.src='https://docs.opencv.org/4.x/opencv.js'; s.async=true;
+        s.onload=()=>{ const wait=()=>{ if(cv && cv.Mat){ onCvReady(); } else setTimeout(wait,50); };
+            if(cv instanceof Promise) cv.then(m=>{window.cv=m;onCvReady();}); else if(cv.onRuntimeInitialized!==undefined && !cv.Mat) cv.onRuntimeInitialized=onCvReady; else wait(); };
+        s.onerror=()=>{ $('cvStatus').innerHTML='<span class="w-2 h-2 rounded-full bg-red-500 inline-block"></span> OpenCV.js 載入失敗'; };
+        document.head.appendChild(s);
+        function onCvReady(){ 
+            cvReady=true; 
+            $('cvStatus').innerHTML='<span class="w-2 h-2 rounded-full bg-green-500 inline-block"></span> OpenCV.js 就緒'; 
+        }
+
+        $('btnCam').onclick=async()=>{
+            try{
+                const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment',width:{ideal:1280},height:{ideal:720}}});
+                video.srcObject=stream; await video.play();
+                $('btnCam').textContent='相機運作中';
+                $('btnCam').className='bg-green-600/20 border border-green-500 text-green-400 px-3 py-1.5 rounded text-sm';
+                loop();
+            }catch(e){ alert('無法開啟相機：'+e.message); }
+        };
+
+        function loop(){ if(video.readyState>=2) processFrame(video,video.videoWidth,video.videoHeight); requestAnimationFrame(loop); }
+
+        // ==========================================
+        // 4. 多點路徑建立 / 編輯
+        // ==========================================
+        function setRouteButtonState() {
+            const hasRoute = routePoints.length > 0;
+            btnClearRoute.disabled = !hasRoute;
+            btnClearRoute.classList.toggle('opacity-50', !hasRoute);
+            btnClearRoute.classList.toggle('cursor-not-allowed', !hasRoute);
+
+            // 自駕途中不允許復原，避免正在追蹤的索引被改動；仍可繼續點擊追加新點。
+            const canUndo = hasRoute && !autoMode;
+            btnUndoWaypoint.disabled = !canUndo;
+            btnUndoWaypoint.classList.toggle('opacity-50', !canUndo);
+            btnUndoWaypoint.classList.toggle('cursor-not-allowed', !canUndo);
+
+            btnAutoStart.disabled = !hasRoute || autoMode;
+            btnAutoStart.classList.toggle('opacity-50', !hasRoute || autoMode);
+            btnAutoStart.classList.toggle('cursor-not-allowed', !hasRoute || autoMode);
+            btnAutoStartOverlay.disabled = !hasRoute || autoMode;
+            btnAutoStartOverlay.classList.toggle('opacity-50', !hasRoute || autoMode);
+            btnAutoStartOverlay.classList.toggle('cursor-not-allowed', !hasRoute || autoMode);
+        }
+
+        function updateRouteStatus(prefix='') {
+            if(routePoints.length === 0) {
+                targetStatus.innerHTML = '連續點擊畫面可建立多點路徑';
+                return;
+            }
+            const pfx = prefix ? `<span class="text-green-400">${prefix}</span> · ` : '';
+            if(routeCompleted) {
+                targetStatus.innerHTML = `${pfx}<span class="text-green-400 font-bold">路徑完成 ${routePoints.length}/${routePoints.length}</span>`;
+            } else {
+                const shownIndex = Math.min(currentRouteIndex + 1, routePoints.length);
+                targetStatus.innerHTML = `${pfx}路徑 <b class="text-green-400">${routePoints.length}</b> 點 · 目前 <b class="text-yellow-300">${shownIndex}/${routePoints.length}</b>`;
+            }
+        }
+
+        function clearRoute() {
+            routePoints = [];
+            currentRouteIndex = 0;
+            routeCompleted = false;
+            targetPoint = null;
+            if(autoMode) disableAutoMode();
+            setRouteButtonState();
+            updateRouteStatus();
+        }
+
+        btnClearRoute.addEventListener('click', () => clearRoute());
+
+        btnUndoWaypoint.addEventListener('click', () => {
+            if(autoMode || routePoints.length === 0) return;
+            routePoints.pop();
+            routeCompleted = false;
+            if(routePoints.length === 0) {
+                currentRouteIndex = 0;
+                targetPoint = null;
+            } else {
+                currentRouteIndex = Math.min(currentRouteIndex, routePoints.length - 1);
+                targetPoint = routePoints[currentRouteIndex];
+            }
+            setRouteButtonState();
+            updateRouteStatus('已復原');
+        });
+
+        stageContainer.addEventListener('click', (e) => {
+            if(!cvReady || !video.srcObject) return;
+
+            // 計算 object-fit: contain 下真實影像區域與座標
+            const rect = stageContainer.getBoundingClientRect();
+            const scaleX = video.videoWidth / rect.width;
+            const scaleY = video.videoHeight / rect.height;
+            const scale = Math.max(scaleX, scaleY);
+            const drawW = video.videoWidth / scale;
+            const drawH = video.videoHeight / scale;
+            const offsetX = (rect.width - drawW) / 2;
+            const offsetY = (rect.height - drawH) / 2;
+            const clickX = (e.clientX - rect.left - offsetX) * scale;
+            const clickY = (e.clientY - rect.top - offsetY) * scale;
+
+            if(clickX >= 0 && clickX <= video.videoWidth && clickY >= 0 && clickY <= video.videoHeight) {
+                const newPoint = { x: clickX, y: clickY };
+
+                // 若上一條路徑已跑完，繼續點擊會從終點向後追加，而不是清掉舊路徑。
+                if(routeCompleted && !autoMode) {
+                    routeCompleted = false;
+                    currentRouteIndex = routePoints.length;
+                }
+
+                routePoints.push(newPoint);
+                if(routePoints.length === 1) {
+                    currentRouteIndex = 0;
+                    targetPoint = routePoints[0];
+                } else if(!targetPoint && currentRouteIndex < routePoints.length) {
+                    targetPoint = routePoints[currentRouteIndex];
+                }
+
+                setRouteButtonState();
+                updateRouteStatus(`新增 P${routePoints.length}`);
+            }
+        });
+
+        // ==========================================
+        // 5. 自動導航邏輯
+        // ==========================================
+        function startAutoMode() {
+            if(routePoints.length === 0) return;
+
+            // 完整路徑跑完後再次按「開始」＝從 P1 重跑；手動停止後則保留目前進度。
+            if(routeCompleted || !targetPoint || currentRouteIndex >= routePoints.length) {
+                currentRouteIndex = 0;
+                routeCompleted = false;
+                targetPoint = routePoints[0];
+            }
+            autoMode = true;
+            
+            // --- 歷程紀錄開始 ---
+            commandHistory = []; // 每次自動開始時清空舊紀錄
+            isRecording = true;
+            lastRecordedCmd = "";
+            // --------------------
+
+            modeDisplay.textContent = "自動導航中";
+            modeDisplay.className = "text-yellow-400 font-bold animate-pulse";
+            
+            btnAutoStart.disabled = true;
+            btnAutoStart.classList.add('opacity-50', 'cursor-not-allowed');
+            btnAutoStartOverlay.disabled = true;
+            btnAutoStartOverlay.classList.add('opacity-50', 'cursor-not-allowed');
+            
+            btnAutoStop.disabled = false;
+            btnAutoStop.classList.remove('opacity-50', 'cursor-not-allowed');
+            btnAutoStopOverlay.disabled = false;
+            btnAutoStopOverlay.classList.remove('opacity-50', 'cursor-not-allowed');
+            
+            // 視覺回饋：禁用搖桿UI
+            $('leftKnob').style.backgroundColor = '#1a231d';
+            $('rightKnob').style.backgroundColor = '#1a231d';
+            setRouteButtonState();
+            updateRouteStatus();
+        }
+
+        btnAutoStart.addEventListener('click', startAutoMode);
+        // 使用 e.stopPropagation() 防止點擊按鈕時觸發後方畫布的設定目標點功能
+        btnAutoStartOverlay.addEventListener('click', (e) => { e.stopPropagation(); startAutoMode(); });
+
+        btnAutoStop.addEventListener('click', disableAutoMode);
+        btnAutoStopOverlay.addEventListener('click', (e) => { e.stopPropagation(); disableAutoMode(); });
+
+        function disableAutoMode() {
+            autoMode = false;
+            isRecording = false; // 停止紀錄
+            modeDisplay.textContent = "手動";
+            modeDisplay.className = "text-blue-300";
+            
+            steeringVal = 1500;
+            throttleVal = 1500;
+            $('leftValDisplay').textContent = 1500;
+            $('rightValDisplay').textContent = 1500;
+            $('leftKnob').style.transform = `translate(-50%, -50%)`;
+            $('rightKnob').style.transform = `translate(-50%, -50%)`;
+            
+            btnAutoStop.disabled = true;
+            btnAutoStop.classList.add('opacity-50', 'cursor-not-allowed');
+            btnAutoStopOverlay.disabled = true;
+            btnAutoStopOverlay.classList.add('opacity-50', 'cursor-not-allowed');
+            
+            // 恢復搖桿UI
+            $('leftKnob').style.backgroundColor = '#22e07a';
+            $('rightKnob').style.backgroundColor = '#22e07a';
+            setRouteButtonState();
+        }
+
+        function markerToNavPose(marker) {
+            if(!marker || !marker.corners) return null;
+            const corners = marker.corners;
+            let cx=0, cy=0;
+            corners.forEach(p => { cx += p[0]; cy += p[1]; });
+            cx /= 4; cy /= 4;
+            const fx = (corners[0][0] + corners[1][0]) / 2;
+            const fy = (corners[0][1] + corners[1][1]) / 2;
+            let hx = fx - cx, hy = fy - cy;
+            const hl = Math.hypot(hx, hy) || 1;
+            hx /= hl; hy /= hl;
+            return { center:{x:cx,y:cy}, heading:{x:hx,y:hy}, source:'ArUco', corners };
+        }
+
+        function chooseNavigationPose(arucoPose, ledPose) {
+            if(visionMode === 'aruco') return arucoPose;
+            if(visionMode === 'led') return ledPose;
+
+            // 同時模式：ArUco 提供穩定中心位置，LED 提供車頭方向。
+            if(arucoPose && ledPose) {
+                return {
+                    center: {x: arucoPose.center.x, y: arucoPose.center.y},
+                    heading: {x: ledPose.heading.x, y: ledPose.heading.y},
+                    source: 'ArUco+LED',
+                    corners: arucoPose.corners
+                };
+            }
+            // 任一來源短暫看不到時自動 fallback，避免車輛立即停住。
+            return ledPose || arucoPose;
+        }
+
+        function calculateNavigationPose(vehiclePose) {
+            if(!autoMode || !targetPoint || !vehiclePose) return;
+
+            const cx = vehiclePose.center.x, cy = vehiclePose.center.y;
+            carScreenPos = {x: cx, y: cy};
+
+            const carVecX = vehiclePose.heading.x;
+            const carVecY = vehiclePose.heading.y;
+            const tgtVecX = targetPoint.x - cx;
+            const tgtVecY = targetPoint.y - cy;
+
+            const carAngle = Math.atan2(carVecY, carVecX);
+            const tgtAngle = Math.atan2(tgtVecY, tgtVecX);
+
+            // 角度差 (-PI 到 PI)
+            const diffAngle = Math.atan2(Math.sin(tgtAngle - carAngle), Math.cos(tgtAngle - carAngle));
+            const dist = Math.hypot(tgtVecX, tgtVecY);
+
+            // 抵達目前路徑點：不是最後一點就自動切換到下一點，不停車。
+            if (dist < WAYPOINT_REACHED_PX) {
+                const reachedNo = currentRouteIndex + 1;
+                if(currentRouteIndex < routePoints.length - 1) {
+                    currentRouteIndex++;
+                    targetPoint = routePoints[currentRouteIndex];
+                    updateRouteStatus(`已到達 P${reachedNo}，前往 P${currentRouteIndex + 1}`);
+                    return;
+                }
+
+                // 最後一點才結束整條自動導航。
+                routeCompleted = true;
+                currentRouteIndex = routePoints.length;
+                targetPoint = null;
+                targetStatus.innerHTML = `<span class="text-green-400 font-bold">路徑完成！已抵達 P${routePoints.length}</span>`;
+                disableAutoMode();
+                setRouteButtonState();
+                return;
+            }
+
+            // PID 比例控制 (Steering) - 保留原先控制參數
+            let steer = 1500 + (diffAngle * (180/Math.PI)) * 4.5;
+            steer = Math.max(1000, Math.min(2000, steer));
+
+            // Throttle 控制 - 保留原先控制參數
+            let throttle = 1500;
+            const absDiff = Math.abs(diffAngle);
+            if (absDiff < 0.3) {
+                throttle = 1650;
+            } else if (absDiff > 1.2) {
+                throttle = 1500;
+                if(steer > 1500) steer = 1800; else steer = 1200;
+            } else {
+                throttle = 1580;
+            }
+
+            steeringVal = Math.round(steer);
+            throttleVal = Math.round(throttle);
+            $('leftValDisplay').textContent = `A:${throttleVal}`;
+            $('rightValDisplay').textContent = `A:${steeringVal}`;
+        }
+
+        // 保留舊函式名稱，若其他程式仍呼叫 corners 也能正常工作。
+        function calculateNavigation(corners) {
+            const pose = markerToNavPose({corners});
+            calculateNavigationPose(pose);
+        }
+
+        // ==========================================
+        // 6. 影像處理與繪製 (整合 ArUco)
+        // ==========================================
+        function processFrame(src,W,H){
+            if(!cvReady||!W||!H) return;
+            overlay.width=W; overlay.height=H; ctx.clearRect(0,0,W,H);
+            const scale=Math.min(1,PROC_W/W), pw=Math.round(W*scale), ph=Math.round(H*scale);
+            procCanvas.width=pw; procCanvas.height=ph; pctx.drawImage(src,0,0,pw,ph);
+
+            const rgba=cv.imread(procCanvas);
+            let gray=null, bin=null, contours=null, hier=null, K=null, dist=null;
+            let targetMarker = null;
+
+            // ---------- ArUco 辨識 ----------
+            if(visionMode !== 'led') {
+                gray=new cv.Mat(); bin=new cv.Mat();
+                cv.cvtColor(rgba,gray,cv.COLOR_RGBA2GRAY);
+                cv.adaptiveThreshold(gray,bin,255,cv.ADAPTIVE_THRESH_MEAN_C,cv.THRESH_BINARY_INV,23,7);
+                contours=new cv.MatVector(); hier=new cv.Mat();
+                cv.findContours(bin,contours,hier,cv.RETR_LIST,cv.CHAIN_APPROX_SIMPLE);
+
+                const cands=[];
+                const minPer=4*Math.max(18,0.03*pw);
+                for(let i=0;i<contours.size();i++){
+                    const cnt=contours.get(i), per=cv.arcLength(cnt,true);
+                    if(per<minPer){cnt.delete();continue;}
+                    const ap=new cv.Mat(); cv.approxPolyDP(cnt,ap,0.04*per,true);
+                    if(ap.rows===4 && cv.isContourConvex(ap)){
+                        let pts=[]; for(let k=0;k<4;k++) pts.push([ap.data32S[k*2],ap.data32S[k*2+1]]);
+                        let area=0; for(let k=0;k<4;k++){const a=pts[k],b=pts[(k+1)%4]; area+=a[0]*b[1]-b[0]*a[1];}
+                        if(area<0) pts.reverse();
+                        let minSide=1e9; for(let k=0;k<4;k++){const a=pts[k],b=pts[(k+1)%4]; minSide=Math.min(minSide,Math.hypot(a[0]-b[0],a[1]-b[1]));}
+                        if(minSide>10) cands.push({pts,per});
+                    }
+                    ap.delete(); cnt.delete();
+                }
+                cands.sort((a,b)=>b.per-a.per);
+                const kept=[];
+                for(const c of cands){
+                    if(!kept.some(k=>c.pts.every(p=>k.pts.some(q=>Math.hypot(p[0]-q[0],p[1]-q[1])<0.1*k.per)))) kept.push(c);
+                }
+
+                const results=[];
+                for(const c of kept){ const r=decode(gray,c.pts); if(r) results.push(r); }
+
+                // 參數設定與 3D 估算
+                const fov=+$('fov').value*Math.PI/180, f=(W/2)/Math.tan(fov/2), ms=+$('msize').value||50;
+                K=cv.matFromArray(3,3,cv.CV_64F,[f,0,W/2, 0,f,H/2, 0,0,1]);
+                dist=cv.Mat.zeros(4,1,cv.CV_64F);
+
+                for(const r of results){
+                    const corners=r.corners.map(p=>[p[0]/scale,p[1]/scale]);
+                    const pose=estimatePose(corners,K,dist,ms);
+                    drawMarker(corners,r.id,pose,K,dist,ms);
+                    if(!targetMarker || r.id === 0) targetMarker = { id:r.id, corners, pose };
+                }
+                if(targetMarker) updateReadout(targetMarker);
+                else updateReadout(null);
+            } else {
+                updateReadout(null);
+            }
+
+            // ---------- micro:bit 5x5 LED 方向辨識 ----------
+            let ledPose = null;
+            if(visionMode !== 'aruco') {
+                ledPose = detectLedPose(rgba,pw,ph,scale);
+                if(ledPose) {
+                    ledPose = smoothLedPose(ledPose);
+                    drawLedPose(ledPose);
+                    ledStatus.textContent = `LOCK ${ledPose.pointCount}點`;
+                    ledStatus.className = 'text-red-300';
+                    ledAngle.textContent = `${(Math.atan2(ledPose.heading.y,ledPose.heading.x)*180/Math.PI).toFixed(1)}°`;
+                } else {
+                    lastLedPose = null;
+                    ledStatus.textContent = '未辨識';
+                    ledStatus.className = 'text-yellow-500';
+                    ledAngle.textContent = '—';
+                }
+            }
+
+            const arucoPose = targetMarker ? markerToNavPose(targetMarker) : null;
+            const navPose = chooseNavigationPose(arucoPose, ledPose);
+
+            // --- 目標繪製與自駕邏輯觸發 ---
+            drawTargetAndLine(navPose);
+
+            if(navPose) {
+                carMissingFrames = 0;
+                if(autoMode) calculateNavigationPose(navPose);
+            } else {
+                carMissingFrames++;
+                if(autoMode && carMissingFrames > 5) {
+                    steeringVal = 1500;
+                    throttleVal = 1500;
+                    $('leftValDisplay').textContent = `LOST`;
+                    $('rightValDisplay').textContent = `LOST`;
+                }
+            }
+
+            if(K) K.delete(); if(dist) dist.delete();
+            if(gray) gray.delete(); if(bin) bin.delete(); if(contours) contours.delete(); if(hier) hier.delete();
+            rgba.delete();
+        }
+
+        // =========================================================
+        // micro:bit 5x5 LED 圖形：
+        // 0 1 1 1 0
+        // 0 0 1 0 0
+        // 0 0 0 0 0
+        // 1 0 0 0 1
+        // 1 0 0 0 1
+        // 前端橫向分布較窄、後端較寬，因此可消除 180° 方向歧義。
+        // =========================================================
+        function detectLedPose(rgba,pw,ph,scale) {
+            const rThreshold = Math.max(80, Math.min(250, +$('ledRThreshold').value || 140));
+            const dominance = Math.max(10, Math.min(120, +$('ledDominance').value || 30));
+            const mask = new cv.Mat(ph,pw,cv.CV_8UC1);
+            const md = mask.data, d = rgba.data;
+
+            // micro:bit LED 為紅色。以 R 亮度 + R/G、R/B 色差做遮罩，
+            // 可避開 ArUco 的白色區域，兩種標記可同時出現在畫面。
+            for(let i=0,j=0;i<d.length;i+=4,j++) {
+                const r=d[i], g=d[i+1], b=d[i+2];
+                md[j] = (r >= rThreshold && (r-g) >= dominance && (r-b) >= dominance) ? 255 : 0;
+            }
+
+            const clean = new cv.Mat();
+            const kernel = cv.Mat.ones(3,3,cv.CV_8U);
+            cv.morphologyEx(mask,clean,cv.MORPH_CLOSE,kernel);
+
+            const cs = new cv.MatVector(), hh = new cv.Mat();
+            cv.findContours(clean,cs,hh,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);
+            const blobs=[];
+            const maxBlobArea = pw*ph*0.02;
+            for(let i=0;i<cs.size();i++) {
+                const cnt=cs.get(i);
+                const area=cv.contourArea(cnt);
+                if(area>=1.5 && area<=maxBlobArea) {
+                    const m=cv.moments(cnt,false);
+                    if(Math.abs(m.m00)>1e-6) {
+                        const rect=cv.boundingRect(cnt);
+                        // 排除極端細長或佔畫面太大的紅色物件。
+                        if(rect.width < pw*0.28 && rect.height < ph*0.28) {
+                            blobs.push({x:m.m10/m.m00,y:m.m01/m.m00,area,rect});
+                        }
+                    }
+                }
+                cnt.delete();
+            }
+            mask.delete(); clean.delete(); kernel.delete(); cs.delete(); hh.delete();
+
+            if(blobs.length < 3) return null;
+
+            // 優先保留面積較大的 12 個紅色亮點，避免背景零星紅光干擾。
+            blobs.sort((a,b)=>b.area-a.area);
+            let pts = blobs.slice(0,12);
+            let front=null, rear=null, confidence=0;
+
+            // LED 點彼此清楚時，通常會看到 6~10 個獨立亮點（理想為 8 點）。
+            if(pts.length >= 6) {
+                // 若候選超過 10 個，以距離整體中位面積較近者優先。
+                if(pts.length > 10) pts = pts.slice(0,10);
+
+                let mx=0,my=0;
+                pts.forEach(p=>{mx+=p.x;my+=p.y;}); mx/=pts.length; my/=pts.length;
+                let cxx=0,cyy=0,cxy=0;
+                pts.forEach(p=>{const x=p.x-mx,y=p.y-my;cxx+=x*x;cyy+=y*y;cxy+=x*y;});
+                cxx/=pts.length; cyy/=pts.length; cxy/=pts.length;
+
+                // PCA 主軸。此圖形在車身前後方向的變異略大於左右方向。
+                const theta=0.5*Math.atan2(2*cxy,cxx-cyy);
+                let ux=Math.cos(theta), uy=Math.sin(theta);
+                const vx=-uy, vy=ux;
+                const projected=pts.map(p=>({p,long:(p.x-mx)*ux+(p.y-my)*uy,cross:(p.x-mx)*vx+(p.y-my)*vy}));
+                const sortedLong=projected.map(o=>o.long).sort((a,b)=>a-b);
+                const median=sortedLong[Math.floor(sortedLong.length/2)];
+                let low=projected.filter(o=>o.long<=median), high=projected.filter(o=>o.long>median);
+                if(low.length<2 || high.length<2) return null;
+
+                const crossVar = arr => {
+                    const m=arr.reduce((s,o)=>s+o.cross,0)/arr.length;
+                    return arr.reduce((s,o)=>s+(o.cross-m)*(o.cross-m),0)/arr.length;
+                };
+                const vLow=crossVar(low), vHigh=crossVar(high);
+
+                // 圖形前端（T 型）左右分布較窄；後端雙柱左右分布較寬。
+                const frontGroup = vLow < vHigh ? low : high;
+                const rearGroup  = vLow < vHigh ? high : low;
+                const avg = arr => ({
+                    x:arr.reduce((s,o)=>s+o.p.x,0)/arr.length,
+                    y:arr.reduce((s,o)=>s+o.p.y,0)/arr.length
+                });
+                front=avg(frontGroup); rear=avg(rearGroup);
+                confidence=Math.abs(vHigh-vLow)/(vHigh+vLow+1);
+            } else {
+                // 距離較遠或失焦時，相鄰 LED 可能融合成 3~5 個區塊。
+                // 最大區塊通常是前端 4 顆 LED 的 T 型，另外兩側是後端雙柱。
+                const sorted=pts.slice().sort((a,b)=>b.area-a.area);
+                const f=sorted[0];
+                const rest=sorted.slice(1);
+                if(rest.length<2) return null;
+                // 後端取離前端最遠的兩個區塊。
+                rest.sort((a,b)=>Math.hypot(b.x-f.x,b.y-f.y)-Math.hypot(a.x-f.x,a.y-f.y));
+                front={x:f.x,y:f.y};
+                rear={x:(rest[0].x+rest[1].x)/2,y:(rest[0].y+rest[1].y)/2};
+                confidence=Math.min(1,f.area/Math.max(1,(rest[0].area+rest[1].area)/2)/2);
+            }
+
+            let hx=front.x-rear.x, hy=front.y-rear.y;
+            const len=Math.hypot(hx,hy);
+            if(len < 5) return null;
+            hx/=len; hy/=len;
+
+            // 以所有 LED 候選的平均位置作車體中心；轉回原始影片座標。
+            let cx=0,cy=0; pts.forEach(p=>{cx+=p.x;cy+=p.y;}); cx/=pts.length; cy/=pts.length;
+            return {
+                center:{x:cx/scale,y:cy/scale},
+                heading:{x:hx,y:hy},
+                front:{x:front.x/scale,y:front.y/scale},
+                rear:{x:rear.x/scale,y:rear.y/scale},
+                source:'LED',
+                pointCount:pts.length,
+                confidence
+            };
+        }
+
+        function smoothLedPose(pose) {
+            if(!lastLedPose) { lastLedPose=pose; return pose; }
+            const a=LED_SMOOTH_ALPHA;
+            let hx=(1-a)*lastLedPose.heading.x+a*pose.heading.x;
+            let hy=(1-a)*lastLedPose.heading.y+a*pose.heading.y;
+            const hl=Math.hypot(hx,hy)||1; hx/=hl; hy/=hl;
+            const out={...pose,
+                center:{x:(1-a)*lastLedPose.center.x+a*pose.center.x,y:(1-a)*lastLedPose.center.y+a*pose.center.y},
+                heading:{x:hx,y:hy}
+            };
+            lastLedPose=out;
+            return out;
+        }
+
+        function drawLedPose(pose) {
+            if(!pose) return;
+            const cx=pose.center.x, cy=pose.center.y;
+            const arrowLen=Math.max(45, Math.min(120, overlay.width*0.09));
+            const ex=cx+pose.heading.x*arrowLen, ey=cy+pose.heading.y*arrowLen;
+
+            ctx.save();
+            ctx.strokeStyle='#ff5a5a'; ctx.fillStyle='#ff5a5a';
+            ctx.lineWidth=Math.max(3,overlay.width/260);
+            ctx.beginPath(); ctx.arc(cx,cy,8,0,Math.PI*2); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(ex,ey); ctx.stroke();
+            const ang=Math.atan2(pose.heading.y,pose.heading.x);
+            const ah=14;
+            ctx.beginPath();
+            ctx.moveTo(ex,ey);
+            ctx.lineTo(ex-ah*Math.cos(ang-0.55),ey-ah*Math.sin(ang-0.55));
+            ctx.lineTo(ex-ah*Math.cos(ang+0.55),ey-ah*Math.sin(ang+0.55));
+            ctx.closePath(); ctx.fill();
+
+            const label=`LED ${Math.round(Math.atan2(pose.heading.y,pose.heading.x)*180/Math.PI)}°`;
+            ctx.font=`600 ${Math.max(14,overlay.width/45)}px "IBM Plex Mono",monospace`;
+            ctx.fillStyle='rgba(0,0,0,.72)';
+            const tw=ctx.measureText(label).width;
+            ctx.fillRect(cx-tw/2-4,cy+12,tw+8,Math.max(18,overlay.width/40));
+            ctx.fillStyle='#ff8a8a'; ctx.fillText(label,cx-tw/2,cy+Math.max(28,overlay.width/35));
+            ctx.restore();
+        }
+
+        function decode(gray,pts){
+            const CELL=10, N=7, S=CELL*N;
+            const src=cv.matFromArray(4,1,cv.CV_32FC2,pts.flat());
+            const dst=cv.matFromArray(4,1,cv.CV_32FC2,[0,0,S,0,S,S,0,S]);
+            const M=cv.getPerspectiveTransform(src,dst), warp=new cv.Mat(), th=new cv.Mat();
+            cv.warpPerspective(gray,warp,M,new cv.Size(S,S));
+            cv.threshold(warp,th,0,255,cv.THRESH_BINARY|cv.THRESH_OTSU);
+            const d=th.data; let bits='', borderErr=0;
+            for(let r=0;r<N;r++)for(let q=0;q<N;q++){
+                let white=0,tot=0;
+                for(let y=r*CELL+3;y<r*CELL+CELL-3;y++)for(let x=q*CELL+3;x<q*CELL+CELL-3;x++){tot++; if(d[y*S+x]>127) white++;}
+                const bit=white>tot/2?1:0;
+                if(r===0||q===0||r===N-1||q===N-1){ if(bit) borderErr++; } else bits+=bit;
+            }
+            src.delete();dst.delete();M.delete();warp.delete();th.delete();
+            if(borderErr>6) return null;
+            const m=matchDict(bits); if(!m) return null;
+            const k=m.rot, corners=[0,1,2,3].map(i=>pts[(i+4-k)%4]);
+            return {id:m.id,corners};
+        }
+
+        function estimatePose(corners,K,dist,ms){
+            const h=ms/2;
+            const obj=cv.matFromArray(4,1,cv.CV_32FC3,[-h,h,0, h,h,0, h,-h,0, -h,-h,0]);
+            const im=cv.matFromArray(4,1,cv.CV_32FC2,corners.flat());
+            const rvec=new cv.Mat(3,1,cv.CV_64F), tvec=new cv.Mat(3,1,cv.CV_64F);
+            const flag=(cv.SOLVEPNP_IPPE_SQUARE!==undefined)?cv.SOLVEPNP_IPPE_SQUARE:cv.SOLVEPNP_ITERATIVE;
+            cv.solvePnP(obj,im,K,dist,rvec,tvec,false,flag);
+            const R=new cv.Mat(); cv.Rodrigues(rvec,R);
+            const r=R.data64F;
+            const pitch=Math.atan2(-r[6],Math.hypot(r[7],r[8]));
+            const roll=Math.atan2(r[7],r[8]);
+            const yaw=Math.atan2(r[3],r[0]);
+            const t=[tvec.data64F[0],tvec.data64F[1],tvec.data64F[2]];
+            const out={rvec:Array.from(rvec.data64F),t,roll:roll*180/Math.PI,pitch:pitch*180/Math.PI,yaw:yaw*180/Math.PI};
+            obj.delete();im.delete();rvec.delete();tvec.delete();R.delete();
+            return out;
+        }
+
+        function drawMarker(corners,id,pose,K,dist,ms){
+            ctx.lineWidth=Math.max(2,overlay.width/300); ctx.strokeStyle='#22e07a'; ctx.lineJoin='round';
+            ctx.beginPath(); corners.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1])); ctx.closePath(); ctx.stroke();
+            // 左上角標示 (紅色圓點)
+            ctx.fillStyle='#ff5a5a'; ctx.beginPath(); ctx.arc(corners[0][0],corners[0][1],ctx.lineWidth*3,0,Math.PI*2); ctx.fill();
+            
+            // 繪製車頭指示箭頭 (標記的上緣 0->1)
+            let fx = (corners[0][0] + corners[1][0]) / 2;
+            let fy = (corners[0][1] + corners[1][1]) / 2;
+            let cx = (corners[0][0] + corners[1][0] + corners[2][0] + corners[3][0]) / 4;
+            let cy = (corners[0][1] + corners[1][1] + corners[2][1] + corners[3][1]) / 4;
+            
+            ctx.strokeStyle='rgba(255,200,87, 0.8)';
+            ctx.lineWidth=Math.max(3,overlay.width/200);
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(fx + (fx-cx)*0.5, fy + (fy-cy)*0.5); ctx.stroke();
+            ctx.setLineDash([]);
+
+            // 繪製 ID 文字
+            const fs=Math.max(16,overlay.width/30); ctx.font=`600 ${fs}px "IBM Plex Mono",monospace`;
+            const txt=`ID:${id}`;
+            const tw=ctx.measureText(txt).width;
+            ctx.fillStyle='rgba(0,0,0,.7)'; ctx.fillRect(cx-tw/2-4, cy-fs/2-2, tw+8, fs+4);
+            ctx.fillStyle='#22e07a'; ctx.fillText(txt, cx-tw/2, cy+fs/2-2);
+        }
+
+        function drawTargetAndLine(marker) {
+            if(routePoints.length === 0) return;
+
+            // 先畫完整規劃路徑，讓所有導航點與順序一目了然。
+            if(routePoints.length > 1) {
+                ctx.save();
+                ctx.lineWidth = Math.max(2, overlay.width / 500);
+                ctx.strokeStyle = autoMode ? 'rgba(78,163,255,0.75)' : 'rgba(255,255,255,0.35)';
+                ctx.setLineDash([8, 6]);
+                ctx.beginPath();
+                routePoints.forEach((p,i) => i ? ctx.lineTo(p.x,p.y) : ctx.moveTo(p.x,p.y));
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.restore();
+            }
+
+            const time = Date.now() / 200;
+            const pulse = 14 + Math.sin(time) * 4;
+            const labelSize = Math.max(13, overlay.width / 55);
+            ctx.font = `700 ${labelSize}px "IBM Plex Mono", monospace`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+
+            routePoints.forEach((p, i) => {
+                const isPast = routeCompleted || i < currentRouteIndex;
+                const isCurrent = !routeCompleted && i === currentRouteIndex;
+                const radius = isCurrent ? pulse : 11;
+
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, radius, 0, Math.PI*2);
+                ctx.lineWidth = isCurrent ? 4 : 2;
+                ctx.strokeStyle = isPast ? '#22e07a' : (isCurrent ? '#ff5a5a' : 'rgba(255,255,255,0.75)');
+                ctx.stroke();
+
+                ctx.fillStyle = isPast ? 'rgba(34,224,122,0.85)' : (isCurrent ? 'rgba(255,90,90,0.9)' : 'rgba(0,0,0,0.75)');
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, Math.max(9, radius-5), 0, Math.PI*2);
+                ctx.fill();
+
+                ctx.fillStyle = '#ffffff';
+                ctx.fillText(String(i + 1), p.x, p.y + 0.5);
+            });
+
+            ctx.textAlign = 'start';
+            ctx.textBaseline = 'alphabetic';
+
+            // 車輛只連到「目前」導航點；完整路徑已在上方以折線表示。
+            if(marker && targetPoint) {
+                let cx, cy;
+                if(marker.center) {
+                    cx = marker.center.x; cy = marker.center.y;
+                } else if(marker.corners) {
+                    cx = (marker.corners[0][0] + marker.corners[1][0] + marker.corners[2][0] + marker.corners[3][0]) / 4;
+                    cy = (marker.corners[0][1] + marker.corners[1][1] + marker.corners[2][1] + marker.corners[3][1]) / 4;
+                } else return;
+
+                ctx.strokeStyle = autoMode ? '#4ea3ff' : 'rgba(255, 255, 255, 0.3)';
+                ctx.lineWidth = autoMode ? 4 : 2;
+                ctx.beginPath();
+                ctx.moveTo(cx, cy);
+                ctx.lineTo(targetPoint.x, targetPoint.y);
+                ctx.stroke();
+
+                if(autoMode) {
+                    const dist = Math.hypot(targetPoint.x - cx, targetPoint.y - cy);
+                    ctx.fillStyle = '#4ea3ff';
+                    ctx.font = `600 16px "IBM Plex Mono"`;
+                    ctx.fillText(`P${currentRouteIndex + 1}/${routePoints.length}  Dist: ${dist.toFixed(0)}`, (cx+targetPoint.x)/2 + 10, (cy+targetPoint.y)/2);
+                }
+            }
+        }
+
+        function updateReadout(r){
+            if(!r){ 
+                $('idOut').textContent='—'; 
+                ['vx','vy','vz','vd'].forEach(i=>$(i).textContent='—'); 
+                return; 
+            }
+            const {pose}=r; $('idOut').textContent=r.id;
+            $('vx').textContent = pose.roll.toFixed(1)+'°';
+            $('vy').textContent = pose.pitch.toFixed(1)+'°';
+            $('vz').textContent = pose.yaw.toFixed(1)+'°';
+            $('vd').textContent = 'Dist: ' + Math.hypot(...pose.t).toFixed(0)+' mm';
+        }
+
+        // ==========================================
+        // 7. 歷程紀錄 Modal 控制
+        // ==========================================
+        const btnViewHistory = $('btnViewHistory');
+        const historyModal = $('historyModal');
+        const btnCloseHistory = $('btnCloseHistory');
+        const btnClearHistory = $('btnClearHistory');
+        const historyContent = $('historyContent');
+        const historyCount = $('historyCount');
+
+        btnViewHistory.addEventListener('click', () => {
+            historyModal.classList.remove('hidden');
+            renderHistory();
+        });
+        
+        btnCloseHistory.addEventListener('click', () => {
+            historyModal.classList.add('hidden');
+        });
+        
+        btnClearHistory.addEventListener('click', () => {
+            commandHistory = [];
+            renderHistory();
+        });
+
+        function renderHistory() {
+            if (commandHistory.length === 0) {
+                historyContent.innerHTML = '<div class="text-gray-600 text-center py-6 font-sans">這一次導航尚無紀錄...</div>';
+                historyCount.textContent = '共 0 筆紀錄';
+                return;
+            }
+            // 渲染列表 (加上時間戳與指令)
+            historyContent.innerHTML = commandHistory.map(item => `
+                <div class="flex items-center hover:bg-green-900/20 p-1 rounded transition">
+                    <span class="text-gray-500 w-28 shrink-0">[${item.time}]</span>
+                    <span class="text-green-300 font-bold tracking-widest">${item.cmd}</span>
+                </div>
+            `).join('');
+            
+            historyCount.textContent = `共 ${commandHistory.length} 筆紀錄`;
+            
+            // 捲動到最底部
+            setTimeout(() => {
+                historyContent.scrollTop = historyContent.scrollHeight;
+            }, 10);
+        }
+
+    </script>
 </body>
 </html>
