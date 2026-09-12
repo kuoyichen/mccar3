@@ -262,6 +262,10 @@
         let rxCharacteristic = null;
         let isConnected = false;
         let sendInterval = null;
+        // Web Bluetooth GATT 不允許大量重疊寫入；只序列化送出最新控制命令。
+        let bleWriteBusy = false;
+        let blePendingCommand = null;
+        let bleWriteFailures = 0;
 
         // --- 控制變數 ---
         let steeringVal = 1500; // CH1: 方向 (右手左右)
@@ -291,7 +295,23 @@
         const RECOVERY_STEP_MS = 420;
         // RECOVERY 的油門、轉向幅度與最長時間改由畫面上的滑桿即時讀取。
         // 大角度導航時仍保持少量前進，避免一般前輪轉向車因 throttle=1500 而卡住。
-        const NAV_SHARP_TURN_THROTTLE = 1550;
+        const NAV_SHARP_TURN_THROTTLE = 1570;
+
+        // --- 有辨識到車但沒有實際位移時的防卡脫困 ---
+        // 這和「看不到 ArUco」的 recovery 不同：此處是在 ID 持續可見時監看車中心是否真的移動。
+        let stallAnchor = null;
+        let stallBoostUntil = 0;
+        let stallCooldownUntil = 0;
+        let stallBoostCount = 0;
+        let stallBoostSteer = 1500;
+        const STALL_CHECK_MS = 1200;       // 多久沒有足夠位移才判定疑似卡住
+        const STALL_MIN_MOVE_PX = 9;       // 期間車中心至少應移動的畫面像素
+        const STALL_MIN_PROGRESS_PX = 6;   // 或至少要向目標靠近這麼多像素
+        const STALL_BOOST_MS = 700;        // 每次脫困加力維持時間
+        const STALL_COOLDOWN_MS = 900;     // 加力後先給車一點反應時間再重新判定
+
+        // ArUco + LED 模式下，LED 與 ArUco 朝向差異過大時視為 LED 暫時誤判。
+        const BOTH_HEADING_MAX_DIFF_DEG = 65;
 
         // --- 視覺辨識模式與 LED 方向追蹤 ---
         // both = ArUco 位置 + LED 方向（任一遺失時自動退回另一來源）
@@ -457,6 +477,8 @@
         function onDisconnected() {
             isConnected = false;
             rxCharacteristic = null;
+            bleWriteBusy = false;
+            blePendingCommand = null;
             connectBtn.textContent = '連接藍牙';
             connectBtn.className = 'bg-blue-600/20 border border-blue-500 text-blue-400 px-4 py-1.5 rounded font-semibold hover:bg-blue-600/30 transition shadow';
             btStatus.textContent = "藍牙已斷線";
@@ -470,10 +492,44 @@
             return `SRV${pad(steeringVal)}${pad(throttleVal)}${pad(ch3Val)}${pad(ch4Val)}#`;
         }
 
-        async function sendDataToMicrobit() {
+        function queueBleCommand(command) {
+            if (!isConnected || !rxCharacteristic) return;
+            // 永遠只保留最新控制命令；若上一筆還在送，不再啟動第二個 GATT write。
+            blePendingCommand = command;
+            if (!bleWriteBusy) flushBleCommandQueue();
+        }
+
+        async function flushBleCommandQueue() {
+            if (bleWriteBusy) return;
+            bleWriteBusy = true;
+            const encoder = new TextEncoder('utf-8');
+            try {
+                while (blePendingCommand && isConnected && rxCharacteristic) {
+                    const command = blePendingCommand;
+                    blePendingCommand = null;
+                    try {
+                        await rxCharacteristic.writeValueWithoutResponse(encoder.encode(command));
+                        bleWriteFailures = 0;
+                    } catch (e) {
+                        bleWriteFailures++;
+                        console.warn('BLE UART write failed', e);
+                        // 若期間已有更新的命令，保留更新命令；否則下個 100ms heartbeat 再送目前命令。
+                        break;
+                    }
+                }
+            } finally {
+                bleWriteBusy = false;
+                // write 完成瞬間若又有新命令進來，立即續送，不必等下一個 interval。
+                if (blePendingCommand && isConnected && rxCharacteristic) {
+                    Promise.resolve().then(flushBleCommandQueue);
+                }
+            }
+        }
+
+        function sendDataToMicrobit() {
             const command = formatCommand();
             debugString.textContent = command;
-            
+
             // 紀錄指令 (若處於自動模式且指令有變化)
             if (isRecording) {
                 if (command !== lastRecordedCmd) {
@@ -485,20 +541,18 @@
                 }
             }
 
-            if (!isConnected || !rxCharacteristic) return;
-            try {
-                let encoder = new TextEncoder('utf-8');
-                await rxCharacteristic.writeValueWithoutResponse(encoder.encode(command));
-            } catch (e) {}
+            queueBleCommand(command);
         }
 
         function startSendingData() {
             if (sendInterval) clearInterval(sendInterval);
-            sendInterval = setInterval(sendDataToMicrobit, 100); 
+            sendDataToMicrobit();
+            sendInterval = setInterval(sendDataToMicrobit, 100);
         }
         function stopSendingData() {
             if (sendInterval) clearInterval(sendInterval);
             sendInterval = null;
+            blePendingCommand = null;
         }
 
         // ==========================================
@@ -744,6 +798,7 @@
             autoMode = true;
             carMissingFrames = 0;
             resetVisualRecovery(false);
+            resetStallDetector();
             
             // --- 歷程紀錄開始 ---
             commandHistory = []; // 每次自動開始時清空舊紀錄
@@ -782,6 +837,7 @@
             autoMode = false;
             isRecording = false; // 停止紀錄
             resetVisualRecovery(false);
+            resetStallDetector();
             modeDisplay.textContent = "手動";
             modeDisplay.className = "text-blue-300";
             
@@ -801,6 +857,13 @@
             $('leftKnob').style.backgroundColor = '#22e07a';
             $('rightKnob').style.backgroundColor = '#22e07a';
             setRouteButtonState();
+        }
+
+        function resetStallDetector() {
+            stallAnchor = null;
+            stallBoostUntil = 0;
+            stallCooldownUntil = 0;
+            stallBoostSteer = 1500;
         }
 
         function resetVisualRecovery(restoreModeDisplay = true) {
@@ -890,17 +953,101 @@
             if(visionMode === 'aruco') return arucoPose;
             if(visionMode === 'led') return ledPose;
 
-            // 同時模式：ArUco 提供穩定中心位置，LED 提供車頭方向。
+            // 同時模式：正常情況 ArUco 提供中心，LED 提供車頭方向。
+            // 但 LED 在反光、曝光或只抓到部分燈點時可能瞬間翻轉 180°。
+            // 此時用 ArUco 朝向做交叉驗證；差異太大就先相信 ArUco，避免有 ID 卻被錯誤 LED 方向卡住。
             if(arucoPose && ledPose) {
+                const a1 = Math.atan2(arucoPose.heading.y, arucoPose.heading.x);
+                const a2 = Math.atan2(ledPose.heading.y, ledPose.heading.x);
+                const diff = Math.abs(Math.atan2(Math.sin(a2-a1), Math.cos(a2-a1))) * 180 / Math.PI;
+                if(diff <= BOTH_HEADING_MAX_DIFF_DEG) {
+                    return {
+                        center: {x: arucoPose.center.x, y: arucoPose.center.y},
+                        heading: {x: ledPose.heading.x, y: ledPose.heading.y},
+                        source: 'ArUco+LED',
+                        corners: arucoPose.corners
+                    };
+                }
                 return {
                     center: {x: arucoPose.center.x, y: arucoPose.center.y},
-                    heading: {x: ledPose.heading.x, y: ledPose.heading.y},
-                    source: 'ArUco+LED',
-                    corners: arucoPose.corners
+                    heading: {x: arucoPose.heading.x, y: arucoPose.heading.y},
+                    source: 'ArUco(LED reject)',
+                    corners: arucoPose.corners,
+                    ledRejected: true
                 };
             }
-            // 任一來源短暫看不到時自動 fallback，避免車輛立即停住。
             return ledPose || arucoPose;
+        }
+
+        function updateStallDetector(vehiclePose, dist, diffAngle, normalSteer, normalThrottle) {
+            const now = performance.now();
+            const cx = vehiclePose.center.x, cy = vehiclePose.center.y;
+
+            // 正在脫困加力：短時間內直接覆蓋正常導航油門，但仍朝目標方向轉。
+            if(now < stallBoostUntil) {
+                const cfg = getRecoverySettings();
+                const boostThrottle = Math.min(1700, Math.max(1580, cfg.throttle + 30));
+                const steerAmp = Math.max(80, cfg.steerAmp);
+                let steer = normalSteer;
+                if(Math.abs(diffAngle) > 0.25) {
+                    steer = 1500 + Math.sign(diffAngle) * Math.max(steerAmp, Math.min(300, Math.abs(normalSteer - 1500)));
+                } else if(Math.abs(steer - 1500) < 35) {
+                    // 幾乎正對目標卻不動時，給非常小的左右擾動，避免輪胎或馬達停在死區。
+                    const dir = (stallBoostCount % 2 === 0) ? 1 : -1;
+                    steer = 1500 + dir * Math.min(steerAmp, 100);
+                }
+                stallBoostSteer = Math.max(1000, Math.min(2000, Math.round(steer)));
+                modeDisplay.textContent = `有 ID｜防卡脫困 ${stallBoostCount}`;
+                modeDisplay.className = 'text-orange-400 font-bold animate-pulse';
+                return {steer: stallBoostSteer, throttle: boostThrottle, boosting:true};
+            }
+
+            // 剛脫困結束先等待車體反應，避免連續誤觸發。
+            if(now < stallCooldownUntil) {
+                return {steer: normalSteer, throttle: normalThrottle, boosting:false};
+            }
+
+            if(!stallAnchor) {
+                stallAnchor = {x:cx, y:cy, dist, time:now, routeIndex:currentRouteIndex};
+                return {steer: normalSteer, throttle: normalThrottle, boosting:false};
+            }
+
+            // 換導航點後重新建立基準。
+            if(stallAnchor.routeIndex !== currentRouteIndex) {
+                stallAnchor = {x:cx, y:cy, dist, time:now, routeIndex:currentRouteIndex};
+                return {steer: normalSteer, throttle: normalThrottle, boosting:false};
+            }
+
+            if(now - stallAnchor.time >= STALL_CHECK_MS) {
+                const moved = Math.hypot(cx - stallAnchor.x, cy - stallAnchor.y);
+                const progressed = stallAnchor.dist - dist;
+
+                if(dist > WAYPOINT_REACHED_PX + 25 && moved < STALL_MIN_MOVE_PX && progressed < STALL_MIN_PROGRESS_PX) {
+                    stallBoostCount++;
+                    stallBoostUntil = now + STALL_BOOST_MS;
+                    stallCooldownUntil = stallBoostUntil + STALL_COOLDOWN_MS;
+                    stallAnchor = {x:cx, y:cy, dist, time:now, routeIndex:currentRouteIndex};
+                    const cfg = getRecoverySettings();
+                    const boostThrottle = Math.min(1700, Math.max(1580, cfg.throttle + 30));
+                    let steer = normalSteer;
+                    if(Math.abs(diffAngle) < 0.25 && Math.abs(steer - 1500) < 35) {
+                        steer = 1500 + ((stallBoostCount % 2) ? 1 : -1) * Math.min(Math.max(80,cfg.steerAmp),100);
+                    }
+                    stallBoostSteer = Math.max(1000, Math.min(2000, Math.round(steer)));
+                    modeDisplay.textContent = `有 ID｜防卡脫困 ${stallBoostCount}`;
+                    modeDisplay.className = 'text-orange-400 font-bold animate-pulse';
+                    return {steer: stallBoostSteer, throttle: boostThrottle, boosting:true};
+                }
+
+                // 有正常移動或有朝目標進展：更新監看基準。
+                stallAnchor = {x:cx, y:cy, dist, time:now, routeIndex:currentRouteIndex};
+                if(autoMode && !recoveryActive) {
+                    modeDisplay.textContent = '自動導航中';
+                    modeDisplay.className = 'text-yellow-400 font-bold animate-pulse';
+                }
+            }
+
+            return {steer: normalSteer, throttle: normalThrottle, boosting:false};
         }
 
         function calculateNavigationPose(vehiclePose) {
@@ -927,6 +1074,7 @@
                 if(currentRouteIndex < routePoints.length - 1) {
                     currentRouteIndex++;
                     targetPoint = routePoints[currentRouteIndex];
+                    resetStallDetector();
                     updateRouteStatus(`已到達 P${reachedNo}，前往 P${currentRouteIndex + 1}`);
                     return;
                 }
@@ -963,10 +1111,16 @@
             // 導航中只要尚未抵達目標，就不允許因控制分支意外留下中立油門。
             if(dist >= WAYPOINT_REACHED_PX && throttle <= 1500) throttle = NAV_SHARP_TURN_THROTTLE;
 
+            // 即使 ID 一直存在，也監看畫面中的車中心是否真的有移動。
+            // 若 1.2 秒內幾乎沒有位移/進展，短暫使用「搜尋油門」+30 作為脫困油門。
+            const antiStall = updateStallDetector(vehiclePose, dist, diffAngle, steer, throttle);
+            steer = antiStall.steer;
+            throttle = antiStall.throttle;
+
             steeringVal = Math.round(steer);
             throttleVal = Math.round(throttle);
-            $('leftValDisplay').textContent = `A:${throttleVal}`;
-            $('rightValDisplay').textContent = `A:${steeringVal}`;
+            $('leftValDisplay').textContent = antiStall.boosting ? `BOOST:${throttleVal}` : `A:${throttleVal}`;
+            $('rightValDisplay').textContent = antiStall.boosting ? `BOOST:${steeringVal}` : `A:${steeringVal}`;
         }
 
         // 保留舊函式名稱，若其他程式仍呼叫 corners 也能正常工作。
@@ -1067,6 +1221,7 @@
                 if(autoMode) calculateNavigationPose(navPose);
             } else {
                 carMissingFrames++;
+                stallAnchor = null;
                 if(autoMode) {
                     if(visionMode === 'led') {
                         // LED-only 模式沒有 ArUco 可搜尋，沿用原本安全停止邏輯。
@@ -1081,6 +1236,18 @@
                         runVisualRecovery();
                     }
                 }
+            }
+
+            if(autoMode && performance.now() < stallBoostUntil && navPose) {
+                const bx = navPose.center.x, by = navPose.center.y;
+                ctx.save();
+                ctx.font = `700 ${Math.max(16, overlay.width/45)}px "IBM Plex Mono",monospace`;
+                ctx.fillStyle = '#ff9f43';
+                ctx.strokeStyle = 'rgba(0,0,0,.8)';
+                ctx.lineWidth = 4;
+                ctx.strokeText('BOOST', bx + 20, by - 20);
+                ctx.fillText('BOOST', bx + 20, by - 20);
+                ctx.restore();
             }
 
             if(K) K.delete(); if(dist) dist.delete();
