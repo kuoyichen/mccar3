@@ -115,7 +115,7 @@
         <div class="flex-1 flex flex-col p-2 gap-2 overflow-y-auto">
             <!-- Camera Stage -->
             <div class="stage" id="stageContainer">
-                <button id="btnFullscreen" class="absolute top-2 left-2 bg-gray-800/80 border border-gray-500 text-white px-3 py-1 rounded text-sm z-30 hover:bg-gray-700 transition cursor-pointer">全螢幕</button>
+                <button id="btnExitFullscreen" class="hidden absolute top-2 left-2 bg-gray-800/80 border border-gray-500 text-white px-3 py-1 rounded text-sm z-30 hover:bg-gray-700 transition cursor-pointer">離開全螢幕</button>
                 <div class="absolute top-2 right-2 flex gap-2 z-30">
                     <button id="btnAutoStartOverlay" disabled class="bg-green-600/80 border border-green-500 text-white px-3 py-1 rounded text-sm opacity-50 cursor-not-allowed transition hover:bg-green-500 disabled:hover:bg-green-600/80 cursor-pointer shadow-lg shadow-black/50">開始</button>
                     <button id="btnAutoStopOverlay" disabled class="bg-red-600/80 border border-red-500 text-white px-3 py-1 rounded text-sm opacity-50 cursor-not-allowed transition hover:bg-red-500 disabled:hover:bg-red-600/80 cursor-pointer shadow-lg shadow-black/50">停止</button>
@@ -146,9 +146,10 @@
                     </button>
                 </div>
 
-                <div class="grid grid-cols-2 gap-2">
-                    <button id="btnUndoWaypoint" disabled class="bg-yellow-600/10 border border-yellow-700/70 text-yellow-400 py-1.5 rounded text-xs opacity-50 cursor-not-allowed transition hover:bg-yellow-600/20">復原上一點</button>
-                    <button id="btnClearRoute" disabled class="bg-red-600/10 border border-red-800 text-red-400 py-1.5 rounded text-xs opacity-50 cursor-not-allowed transition hover:bg-red-600/20">清除路徑</button>
+                <div class="grid grid-cols-3 gap-2">
+                    <button id="btnUndoWaypoint" disabled class="min-w-0 whitespace-nowrap bg-yellow-600/10 border border-yellow-700/70 text-yellow-400 py-1.5 px-1 rounded text-xs opacity-50 cursor-not-allowed transition hover:bg-yellow-600/20">復原上一點</button>
+                    <button id="btnFullscreen" class="min-w-0 whitespace-nowrap bg-gray-700/30 border border-gray-600 text-gray-200 py-1.5 px-1 rounded text-xs transition hover:bg-gray-700/50 cursor-pointer">相機全螢幕</button>
+                    <button id="btnClearRoute" disabled class="min-w-0 whitespace-nowrap bg-red-600/10 border border-red-800 text-red-400 py-1.5 px-1 rounded text-xs opacity-50 cursor-not-allowed transition hover:bg-red-600/20">清除路徑</button>
                 </div>
                 
                 <div class="text-xs text-gray-400 bg-black/30 p-2 rounded data-readout flex justify-between gap-2 flex-wrap">
@@ -386,17 +387,28 @@
         // 全螢幕切換邏輯
         // ==========================================
         const btnFullscreen = $('btnFullscreen');
+        const btnExitFullscreen = $('btnExitFullscreen');
         let isFullscreen = false;
+
+        function setCameraFullscreen(enabled) {
+            isFullscreen = enabled;
+            stageContainer.classList.toggle('stage-fullscreen', enabled);
+            btnExitFullscreen.classList.toggle('hidden', !enabled);
+            btnFullscreen.textContent = enabled ? '已全螢幕' : '相機全螢幕';
+        }
+
         btnFullscreen.addEventListener('click', (e) => {
-            e.stopPropagation(); // 避免點擊按鈕時觸發畫布設定目標點
-            isFullscreen = !isFullscreen;
-            if(isFullscreen) {
-                stageContainer.classList.add('stage-fullscreen');
-                btnFullscreen.textContent = '回復';
-            } else {
-                stageContainer.classList.remove('stage-fullscreen');
-                btnFullscreen.textContent = '全螢幕';
-            }
+            e.stopPropagation();
+            setCameraFullscreen(true);
+        });
+
+        btnExitFullscreen.addEventListener('click', (e) => {
+            e.stopPropagation();
+            setCameraFullscreen(false);
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if(e.key === 'Escape' && isFullscreen) setCameraFullscreen(false);
         });
 
         // ==========================================
