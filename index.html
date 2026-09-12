@@ -175,6 +175,29 @@
                         <label>紅光門檻 <input id="ledRThreshold" type="number" min="80" max="250" value="140" class="w-14 bg-black border border-gray-700 text-center rounded ml-1"></label>
                         <label>色差 <input id="ledDominance" type="number" min="10" max="120" value="30" class="w-14 bg-black border border-gray-700 text-center rounded ml-1"></label>
                     </div>
+
+                    <!-- ArUco 暫時遺失時的搜尋參數，可即時調整 -->
+                    <div class="mt-1 bg-black/30 border border-orange-900/50 rounded p-2 flex flex-col gap-2">
+                        <div class="flex justify-between items-center text-[11px]">
+                            <span class="text-orange-300 font-semibold">ArUco 搜尋設定</span>
+                            <span class="text-gray-500">遺失時才生效</span>
+                        </div>
+                        <label class="grid grid-cols-[72px_1fr_48px] gap-2 items-center text-[11px] text-gray-400">
+                            <span>搜尋油門</span>
+                            <input id="recoveryThrottle" type="range" min="1510" max="1700" step="5" value="1570" class="w-full accent-orange-500">
+                            <b id="recoveryThrottleOut" class="text-orange-300 text-right data-readout">1570</b>
+                        </label>
+                        <label class="grid grid-cols-[72px_1fr_48px] gap-2 items-center text-[11px] text-gray-400">
+                            <span>轉向幅度</span>
+                            <input id="recoverySteer" type="range" min="20" max="350" step="10" value="120" class="w-full accent-orange-500">
+                            <b id="recoverySteerOut" class="text-orange-300 text-right data-readout">±120</b>
+                        </label>
+                        <label class="grid grid-cols-[72px_1fr_48px] gap-2 items-center text-[11px] text-gray-400">
+                            <span>搜尋時間</span>
+                            <input id="recoveryTime" type="range" min="1" max="15" step="0.5" value="4.5" class="w-full accent-orange-500">
+                            <b id="recoveryTimeOut" class="text-orange-300 text-right data-readout">4.5s</b>
+                        </label>
+                    </div>
                 </div>
             </div>
             
@@ -265,7 +288,9 @@
         let recoveryLastAction = -1;
         const RECOVERY_GRACE_MS = 250;
         const RECOVERY_STEP_MS = 420;
-        const RECOVERY_MAX_MS = 4800;
+        // RECOVERY 的油門、轉向幅度與最長時間改由畫面上的滑桿即時讀取。
+        // 大角度導航時仍保持少量前進，避免一般前輪轉向車因 throttle=1500 而卡住。
+        const NAV_SHARP_TURN_THROTTLE = 1550;
 
         // --- 視覺辨識模式與 LED 方向追蹤 ---
         // both = ArUco 位置 + LED 方向（任一遺失時自動退回另一來源）
@@ -299,6 +324,28 @@
         const visionModeStatus = $('visionModeStatus');
         const ledStatus = $('ledStatus');
         const ledAngle = $('ledAngle');
+        const recoveryThrottle = $('recoveryThrottle');
+        const recoverySteer = $('recoverySteer');
+        const recoveryTime = $('recoveryTime');
+        const recoveryThrottleOut = $('recoveryThrottleOut');
+        const recoverySteerOut = $('recoverySteerOut');
+        const recoveryTimeOut = $('recoveryTimeOut');
+
+        function updateRecoverySliderReadouts() {
+            recoveryThrottleOut.textContent = recoveryThrottle.value;
+            recoverySteerOut.textContent = `±${recoverySteer.value}`;
+            recoveryTimeOut.textContent = `${Number(recoveryTime.value).toFixed(1)}s`;
+        }
+        [recoveryThrottle, recoverySteer, recoveryTime].forEach(el => el.addEventListener('input', updateRecoverySliderReadouts));
+        updateRecoverySliderReadouts();
+
+        function getRecoverySettings() {
+            return {
+                throttle: Math.max(1510, Math.min(1700, Number(recoveryThrottle.value) || 1570)),
+                steerAmp: Math.max(20, Math.min(350, Number(recoverySteer.value) || 120)),
+                maxMs: Math.max(1000, Math.min(15000, (Number(recoveryTime.value) || 4.5) * 1000))
+            };
+        }
 
         function setVisionMode(mode) {
             visionMode = mode;
@@ -774,8 +821,9 @@
                 recoveryLastAction = -1;
             }
 
+            const cfg = getRecoverySettings();
             const elapsed = now - recoveryStartedAt;
-            if(elapsed >= RECOVERY_MAX_MS) {
+            if(elapsed >= cfg.maxMs) {
                 steeringVal = 1500;
                 throttleVal = 1500;
                 $('leftValDisplay').textContent = 'SEARCH STOP';
@@ -787,11 +835,13 @@
 
             if(now < recoveryNextStepAt) return;
 
-            // 小幅搜尋動作。依原程式約定：steering < 1500 = 左、> 1500 = 右；throttle > 1500 = 前進。
+            // 小幅搜尋動作。滑桿值可在搜尋進行中即時生效。
+            // steering < 1500 = 左、> 1500 = 右；throttle > 1500 = 前進。
+            const turnThrottle = Math.max(1510, cfg.throttle - 20);
             const actions = [
-                { steering:1500, throttle:1570, label:'前進', short:'F' },
-                { steering:1380, throttle:1550, label:'左前', short:'L' },
-                { steering:1620, throttle:1550, label:'右前', short:'R' }
+                { steering:1500, throttle:cfg.throttle, label:'前進', short:'F' },
+                { steering:1500-cfg.steerAmp, throttle:turnThrottle, label:'左前', short:'L' },
+                { steering:1500+cfg.steerAmp, throttle:turnThrottle, label:'右前', short:'R' }
             ];
 
             let idx;
@@ -889,11 +939,17 @@
             if (absDiff < 0.3) {
                 throttle = 1650;
             } else if (absDiff > 1.2) {
-                throttle = 1500;
+                // 舊版在大角度時把油門設成 1500，只適合可原地旋轉的底盤。
+                // 一般前輪轉向自走車會因此「有 ID、有路徑、但完全不動」。
+                // 改成低速向前 + 大轉向，讓車有實際位移並把車頭轉向目標。
+                throttle = NAV_SHARP_TURN_THROTTLE;
                 if(steer > 1500) steer = 1800; else steer = 1200;
             } else {
                 throttle = 1580;
             }
+
+            // 導航中只要尚未抵達目標，就不允許因控制分支意外留下中立油門。
+            if(dist >= WAYPOINT_REACHED_PX && throttle <= 1500) throttle = NAV_SHARP_TURN_THROTTLE;
 
             steeringVal = Math.round(steer);
             throttleVal = Math.round(throttle);
