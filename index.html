@@ -255,6 +255,18 @@
         let carMissingFrames = 0;   // 記錄失去目標的幀數
         const WAYPOINT_REACHED_PX = 40;
 
+        // --- ArUco / 視覺短暫遺失時的自動搜尋 ---
+        // 不會一看不到就停車：先短暫沿用原動作，再以低速、小角度隨機前進/左前/右前搜尋。
+        // 搜尋超過上限仍找不到才安全停止；標記一恢復就立刻回到原導航。
+        let visualLostSince = 0;
+        let recoveryActive = false;
+        let recoveryStartedAt = 0;
+        let recoveryNextStepAt = 0;
+        let recoveryLastAction = -1;
+        const RECOVERY_GRACE_MS = 250;
+        const RECOVERY_STEP_MS = 420;
+        const RECOVERY_MAX_MS = 4800;
+
         // --- 視覺辨識模式與 LED 方向追蹤 ---
         // both = ArUco 位置 + LED 方向（任一遺失時自動退回另一來源）
         // aruco = 僅使用 ArUco；led = 僅使用 LED 5x5 圖形
@@ -292,6 +304,7 @@
             visionMode = mode;
             lastLedPose = null;
             carMissingFrames = 0;
+            resetVisualRecovery(false);
 
             const inactive = 'vision-mode-btn bg-gray-900 border border-gray-700 text-gray-400 py-1.5 px-2 rounded text-xs font-medium transition hover:border-gray-500';
             btnVisionBoth.className = inactive;
@@ -670,6 +683,8 @@
                 targetPoint = routePoints[0];
             }
             autoMode = true;
+            carMissingFrames = 0;
+            resetVisualRecovery(false);
             
             // --- 歷程紀錄開始 ---
             commandHistory = []; // 每次自動開始時清空舊紀錄
@@ -707,6 +722,7 @@
         function disableAutoMode() {
             autoMode = false;
             isRecording = false; // 停止紀錄
+            resetVisualRecovery(false);
             modeDisplay.textContent = "手動";
             modeDisplay.className = "text-blue-300";
             
@@ -726,6 +742,72 @@
             $('leftKnob').style.backgroundColor = '#22e07a';
             $('rightKnob').style.backgroundColor = '#22e07a';
             setRouteButtonState();
+        }
+
+        function resetVisualRecovery(restoreModeDisplay = true) {
+            const wasSearching = recoveryActive || visualLostSince > 0;
+            visualLostSince = 0;
+            recoveryActive = false;
+            recoveryStartedAt = 0;
+            recoveryNextStepAt = 0;
+            recoveryLastAction = -1;
+
+            if(restoreModeDisplay && wasSearching && autoMode) {
+                modeDisplay.textContent = "自動導航中";
+                modeDisplay.className = "text-yellow-400 font-bold animate-pulse";
+            }
+        }
+
+        function runVisualRecovery() {
+            if(!autoMode || visionMode === 'led') return;
+
+            const now = performance.now();
+            if(!visualLostSince) visualLostSince = now;
+
+            // 極短暫遮擋先不干預，沿用上一個導航命令，避免畫面抖一下就改動車子。
+            if(now - visualLostSince < RECOVERY_GRACE_MS) return;
+
+            if(!recoveryActive) {
+                recoveryActive = true;
+                recoveryStartedAt = now;
+                recoveryNextStepAt = 0;
+                recoveryLastAction = -1;
+            }
+
+            const elapsed = now - recoveryStartedAt;
+            if(elapsed >= RECOVERY_MAX_MS) {
+                steeringVal = 1500;
+                throttleVal = 1500;
+                $('leftValDisplay').textContent = 'SEARCH STOP';
+                $('rightValDisplay').textContent = 'SEARCH STOP';
+                modeDisplay.textContent = '標記遺失｜安全停止';
+                modeDisplay.className = 'text-red-400 font-bold';
+                return;
+            }
+
+            if(now < recoveryNextStepAt) return;
+
+            // 小幅搜尋動作。依原程式約定：steering < 1500 = 左、> 1500 = 右；throttle > 1500 = 前進。
+            const actions = [
+                { steering:1500, throttle:1570, label:'前進', short:'F' },
+                { steering:1380, throttle:1550, label:'左前', short:'L' },
+                { steering:1620, throttle:1550, label:'右前', short:'R' }
+            ];
+
+            let idx;
+            do { idx = Math.floor(Math.random() * actions.length); }
+            while(actions.length > 1 && idx === recoveryLastAction);
+            recoveryLastAction = idx;
+
+            const a = actions[idx];
+            steeringVal = a.steering;
+            throttleVal = a.throttle;
+            recoveryNextStepAt = now + RECOVERY_STEP_MS;
+
+            $('leftValDisplay').textContent = `找標記:${a.short} ${throttleVal}`;
+            $('rightValDisplay').textContent = `找標記:${a.short} ${steeringVal}`;
+            modeDisplay.textContent = `搜尋 ArUco：${a.label}`;
+            modeDisplay.className = 'text-orange-400 font-bold animate-pulse';
         }
 
         function markerToNavPose(marker) {
@@ -913,14 +995,23 @@
 
             if(navPose) {
                 carMissingFrames = 0;
+                resetVisualRecovery(true);
                 if(autoMode) calculateNavigationPose(navPose);
             } else {
                 carMissingFrames++;
-                if(autoMode && carMissingFrames > 5) {
-                    steeringVal = 1500;
-                    throttleVal = 1500;
-                    $('leftValDisplay').textContent = `LOST`;
-                    $('rightValDisplay').textContent = `LOST`;
+                if(autoMode) {
+                    if(visionMode === 'led') {
+                        // LED-only 模式沒有 ArUco 可搜尋，沿用原本安全停止邏輯。
+                        if(carMissingFrames > 5) {
+                            steeringVal = 1500;
+                            throttleVal = 1500;
+                            $('leftValDisplay').textContent = `LOST`;
+                            $('rightValDisplay').textContent = `LOST`;
+                        }
+                    } else {
+                        // ArUco 或 ArUco+LED 模式：短暫遺失時用小幅隨機動作重新找標記。
+                        runVisualRecovery();
+                    }
                 }
             }
 
