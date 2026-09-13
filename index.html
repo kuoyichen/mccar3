@@ -283,13 +283,13 @@
         let targetPoint = null;
         let carScreenPos = null;
         let carMissingFrames = 0;
-        const WAYPOINT_REACHED_PX = 40;              // 最终点严格停车半径
-        const INTERMEDIATE_WAYPOINT_REACHED_PX = 58; // 中间点采用较宽松的“通过”半径，避免卡在点旁
-        const WAYPOINT_PASS_NEAR_PX = 74;            // 曾接近到此距离后若开始明显远离，也视为已通过
-        const WAYPOINT_PASS_AWAY_PX = 12;
-        const WAYPOINT_HANDOFF_MS = 480;             // 切换到下一点后短暂保持前进，避免中立油门卡住
-        let waypointClosestDist = Infinity;
-        let waypointClosestIndex = -1;
+        const WAYPOINT_REACHED_PX = 40;              // 最终点停车半径
+        const INTERMEDIATE_WAYPOINT_REACHED_PX = 40; // 中间点也使用较精确的小半径，不再提前 58px 切点
+        const WAYPOINT_CONFIRM_FRAMES = 3;            // 连续 3 个有效姿态帧都在当前编号点内才确认到达
+        const WAYPOINT_CONFIRM_HYST_PX = 7;           // 边界抖动迟滞，避免一次像素跳动清掉确认
+        const WAYPOINT_HANDOFF_MS = 480;              // 确认 Pn 后切到 P(n+1) 的短暂前进脉冲
+        let waypointConfirmFrames = 0;
+        let waypointExpectedNo = 1;                   // 严格编号状态机：只允许当前编号完成后 +1
         let waypointHandoffUntil = 0;
 
         // --- ArUco / 視覺短暫遺失時的自動搜尋 ---
@@ -1003,8 +1003,8 @@
                     currentRouteIndex=0;
                     routeCompleted=false;
                     targetPoint=routePoints[0]||null;
-                    waypointClosestIndex=0;
-                    waypointClosestDist=Infinity;
+                    waypointExpectedNo=1;
+                    waypointConfirmFrames=0;
                     waypointHandoffUntil=0;
                     setRouteButtonState();
                     targetStatus.innerHTML=`<span class="text-cyan-300 font-bold">自動掃描 ${routePoints.length} 點</span> · 嚴格安全區 ${(region.safeCoverage*100).toFixed(0)}% · 異色周邊不排點`;
@@ -1059,8 +1059,10 @@
             currentRouteIndex = 0;
             routeCompleted = false;
             targetPoint = null;
-            waypointClosestDist = Infinity;
-            waypointClosestIndex = -1;
+            waypointExpectedNo = 1;
+            waypointConfirmFrames = 0;
+            waypointConfirmFrames = 0;
+            waypointExpectedNo = 1;
             waypointHandoffUntil = 0;
             if(autoMode) disableAutoMode();
             setRouteButtonState();
@@ -1101,8 +1103,8 @@
             if(routeCompleted || !targetPoint || currentRouteIndex >= routePoints.length) {
                 currentRouteIndex=0; routeCompleted=false; targetPoint=routePoints[0];
             }
-            waypointClosestIndex=currentRouteIndex;
-            waypointClosestDist=Infinity;
+            waypointExpectedNo=currentRouteIndex+1;
+            waypointConfirmFrames=0;
             waypointHandoffUntil=0;
             autoMode = true;
             carMissingFrames = 0;
@@ -1147,6 +1149,8 @@
             isRecording = false; // 停止紀錄
             resetVisualRecovery(false);
             resetStallDetector();
+            waypointConfirmFrames = 0;
+            waypointExpectedNo = Math.min(currentRouteIndex + 1, routePoints.length + 1);
             modeDisplay.textContent = "手動";
             modeDisplay.className = "text-blue-300";
             
@@ -1282,8 +1286,8 @@
             if(now-stallAnchor.time>=STALL_CHECK_MS) {
                 const moved=Math.hypot(cx-stallAnchor.x,cy-stallAnchor.y);
                 const progressed=stallAnchor.dist-dist;
-                // 原本 >65px 才会 BOOST，会留下 40~65px 的近点死区；改成离目标 >48px 就能防卡。
-                if(dist>48 && moved<STALL_MIN_MOVE_PX && progressed<STALL_MIN_PROGRESS_PX) {
+                // 精确到点半径为 40px；42px 之外即可防卡，避免重新产生“接近但既不到点也不 BOOST”的死区。
+                if(dist>42 && moved<STALL_MIN_MOVE_PX && progressed<STALL_MIN_PROGRESS_PX) {
                     stallBoostCount++;
                     stallBoostUntil=now+STALL_BOOST_MS;
                     stallCooldownUntil=stallBoostUntil+STALL_COOLDOWN_MS;
@@ -1320,31 +1324,38 @@
             const diffAngle = Math.atan2(Math.sin(tgtAngle - carAngle), Math.cos(tgtAngle - carAngle));
             const dist = Math.hypot(tgtVecX, tgtVecY);
 
-            // 中间点是“经过点”，不要求车中心精确压到 40 px 内；最后一点才严格停车。
+            // 严格编号导航：只能确认当前编号 Pn，Pn 未完成前绝不检查 P(n+1)。
             const isIntermediate = currentRouteIndex < routePoints.length - 1;
             const reachRadius = isIntermediate ? INTERMEDIATE_WAYPOINT_REACHED_PX : WAYPOINT_REACHED_PX;
+            const expectedNo = currentRouteIndex + 1;
 
-            if(waypointClosestIndex !== currentRouteIndex) {
-                waypointClosestIndex = currentRouteIndex;
-                waypointClosestDist = dist;
-            } else if(dist < waypointClosestDist) {
-                waypointClosestDist = dist;
+            // 若索引因为重新开始/编辑路径改变，编号状态机立即同步并重新确认。
+            if(waypointExpectedNo !== expectedNo) {
+                waypointExpectedNo = expectedNo;
+                waypointConfirmFrames = 0;
             }
 
-            // 若曾经已经很接近该中间点，随后距离明显变大，代表车已经从点旁通过，不再强迫回头找点。
-            const passedBy = isIntermediate && waypointClosestDist <= WAYPOINT_PASS_NEAR_PX && dist >= waypointClosestDist + WAYPOINT_PASS_AWAY_PX;
+            // 必须连续数帧真正进入“当前编号”的小范围，才算到达。
+            // 只进入一帧可能是 ArUco 中心抖动，因此不会马上跳到下一点。
+            if(dist <= reachRadius) {
+                waypointConfirmFrames++;
+            } else if(dist > reachRadius + WAYPOINT_CONFIRM_HYST_PX) {
+                waypointConfirmFrames = 0;
+            }
 
-            if (dist < reachRadius || passedBy) {
-                const reachedNo=currentRouteIndex+1;
+            if(waypointConfirmFrames >= WAYPOINT_CONFIRM_FRAMES) {
+                const reachedNo = waypointExpectedNo;
+                waypointConfirmFrames = 0;
+
                 if(isIntermediate) {
-                    currentRouteIndex++;
-                    targetPoint=routePoints[currentRouteIndex];
-                    waypointClosestIndex=currentRouteIndex;
-                    waypointClosestDist=Infinity;
-                    waypointHandoffUntil=performance.now()+WAYPOINT_HANDOFF_MS;
+                    // 严格只能 +1，不允许跳号。
+                    currentRouteIndex = Math.min(currentRouteIndex + 1, routePoints.length - 1);
+                    waypointExpectedNo = currentRouteIndex + 1;
+                    targetPoint = routePoints[currentRouteIndex];
+                    waypointHandoffUntil = performance.now() + WAYPOINT_HANDOFF_MS;
                     resetStallDetector();
 
-                    // 在切点这一帧立即产生下一点的转向与前进命令，避免 return 后沿用上一帧的 1500 中立油门。
+                    // 切点当下立刻针对下一编号点产生控制，避免留下上一帧的中立油门。
                     const nx=targetPoint.x-cx, ny=targetPoint.y-cy;
                     const nextAngle=Math.atan2(ny,nx);
                     const nextDiff=Math.atan2(Math.sin(nextAngle-carAngle),Math.cos(nextAngle-carAngle));
@@ -1353,18 +1364,19 @@
                     const cfg=getRecoverySettings();
                     steeringVal=Math.round(nextSteer);
                     throttleVal=Math.round(Math.min(1680,Math.max(1620,cfg.throttle+20)));
-                    $('leftValDisplay').textContent=`NEXT:${throttleVal}`;
-                    $('rightValDisplay').textContent=`NEXT:${steeringVal}`;
-                    updateRouteStatus(passedBy ? `已通過 P${reachedNo}，前往 P${currentRouteIndex+1}` : `已到達 P${reachedNo}，前往 P${currentRouteIndex+1}`);
+                    $('leftValDisplay').textContent=`P${reachedNo}✓ NEXT:${throttleVal}`;
+                    $('rightValDisplay').textContent=`P${waypointExpectedNo}:${steeringVal}`;
+                    updateRouteStatus(`P${reachedNo} 已確認，前往 P${waypointExpectedNo}`);
                     return;
                 }
+
                 routeCompleted=true;
                 currentRouteIndex=routePoints.length;
+                waypointExpectedNo=routePoints.length+1;
                 targetPoint=null;
-                waypointClosestDist=Infinity;
-                waypointClosestIndex=-1;
+                waypointConfirmFrames=0;
                 waypointHandoffUntil=0;
-                targetStatus.innerHTML=`<span class="text-green-400 font-bold">路徑完成！已抵達 P${routePoints.length}</span>`;
+                targetStatus.innerHTML=`<span class="text-green-400 font-bold">P${routePoints.length} 已確認 · 路徑完成！</span>`;
                 disableAutoMode(); setRouteButtonState(); return;
             }
 
@@ -1393,8 +1405,9 @@
             steer=antiStall.steer; throttle=antiStall.throttle;
             steeringVal=Math.round(steer);
             throttleVal=Math.round(throttle);
-            $('leftValDisplay').textContent = antiStall.boosting ? `BOOST:${throttleVal}` : `A:${throttleVal}`;
-            $('rightValDisplay').textContent = antiStall.boosting ? `BOOST:${steeringVal}` : `A:${steeringVal}`;
+            const confirmTag = waypointConfirmFrames > 0 ? ` P${waypointExpectedNo}[${waypointConfirmFrames}/${WAYPOINT_CONFIRM_FRAMES}]` : '';
+            $('leftValDisplay').textContent = antiStall.boosting ? `BOOST:${throttleVal}` : `A:${throttleVal}${confirmTag}`;
+            $('rightValDisplay').textContent = antiStall.boosting ? `BOOST:${steeringVal}` : `P${waypointExpectedNo}:${steeringVal}`;
         }
 
         function calculateNavigation(corners) {
