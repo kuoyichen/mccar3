@@ -177,7 +177,6 @@
                         <label>色差 <input id="ledDominance" type="number" min="10" max="120" value="30" class="w-14 bg-black border border-gray-700 text-center rounded ml-1"></label>
                     </div>
 
-                    <!-- ArUco 暫時遺失時的搜尋參數，可即時調整 -->
                     <div class="mt-1 bg-black/30 border border-orange-900/50 rounded p-2 flex flex-col gap-2">
                         <div class="flex justify-between items-center text-[11px]">
                             <span class="text-orange-300 font-semibold">ArUco 搜尋設定</span>
@@ -262,7 +261,6 @@
         let rxCharacteristic = null;
         let isConnected = false;
         let sendInterval = null;
-        // Web Bluetooth GATT 不允許大量重疊寫入；只序列化送出最新控制命令。
         let bleWriteBusy = false;
         let blePendingCommand = null;
         let bleWriteFailures = 0;
@@ -275,17 +273,15 @@
 
         // --- 自動控制變數 ---
         let autoMode = false;
-        let routePoints = [];       // 使用者依序點選的完整導航路徑 [{x,y}, ...]
-        let currentRouteIndex = 0;  // 目前正在前往的路徑點索引
-        let routeCompleted = false; // 是否已完成整條路徑
-        let targetPoint = null;     // 相容原導航邏輯：永遠指向目前路徑點
-        let carScreenPos = null;    // {x, y} 車子中心在 canvas 上的座標
-        let carMissingFrames = 0;   // 記錄失去目標的幀數
+        let routePoints = [];
+        let currentRouteIndex = 0;
+        let routeCompleted = false;
+        let targetPoint = null;
+        let carScreenPos = null;
+        let carMissingFrames = 0;
         const WAYPOINT_REACHED_PX = 40;
 
         // --- ArUco / 視覺短暫遺失時的自動搜尋 ---
-        // 不會一看不到就停車：先短暫沿用原動作，再以低速、小角度隨機前進/左前/右前搜尋。
-        // 搜尋超過上限仍找不到才安全停止；標記一恢復就立刻回到原導航。
         let visualLostSince = 0;
         let recoveryActive = false;
         let recoveryStartedAt = 0;
@@ -293,24 +289,19 @@
         let recoveryLastAction = -1;
         const RECOVERY_GRACE_MS = 250;
         const RECOVERY_STEP_MS = 420;
-        // RECOVERY 的油門、轉向幅度與最長時間改由畫面上的滑桿即時讀取。
-        // 大角度導航時仍保持少量前進，避免一般前輪轉向車因 throttle=1500 而卡住。
         const NAV_SHARP_TURN_THROTTLE = 1570;
 
         // --- 有辨識到車但沒有實際位移時的防卡脫困 ---
-        // 這和「看不到 ArUco」的 recovery 不同：此處是在 ID 持續可見時監看車中心是否真的移動。
         let stallAnchor = null;
         let stallBoostUntil = 0;
         let stallCooldownUntil = 0;
         let stallBoostCount = 0;
         let stallBoostSteer = 1500;
-        const STALL_CHECK_MS = 1200;       // 多久沒有足夠位移才判定疑似卡住
-        const STALL_MIN_MOVE_PX = 9;       // 期間車中心至少應移動的畫面像素
-        const STALL_MIN_PROGRESS_PX = 6;   // 或至少要向目標靠近這麼多像素
-        const STALL_BOOST_MS = 700;        // 每次脫困加力維持時間
-        const STALL_COOLDOWN_MS = 900;     // 加力後先給車一點反應時間再重新判定
-
-        // ArUco + LED 模式下，LED 與 ArUco 朝向差異過大時視為 LED 暫時誤判。
+        const STALL_CHECK_MS = 1200;
+        const STALL_MIN_MOVE_PX = 9;
+        const STALL_MIN_PROGRESS_PX = 6;
+        const STALL_BOOST_MS = 700;
+        const STALL_COOLDOWN_MS = 900;
         const BOTH_HEADING_MAX_DIFF_DEG = 65;
 
         // --- 視覺辨識模式與 LED 方向追蹤 ---
@@ -319,6 +310,23 @@
         let visionMode = 'both';
         let lastLedPose = null;
         const LED_SMOOTH_ALPHA = 0.35;
+
+        // --- 新版 LED 辨識：針對 micro:bit 掃描顯示做時間融合 ---
+        // 新圖案：
+        // . . # . .   (車頭小團塊，共 4 顆)
+        // . # # # .
+        // . . . . .   (刻意空一列)
+        // # # # # #   (車尾大團塊，共 10 顆)
+        // # # # # #
+        // 手機 rolling shutter 常只拍到其中幾列，因此將最近約 0.22 秒的紅色 LED 做時間殘影融合。
+        let ledTemporalStrength = null;
+        let ledTemporalW = 0, ledTemporalH = 0;
+        let ledTemporalLastTime = 0;
+        let ledLastRawPose = null;
+        let ledLastRawTime = 0;
+        const LED_TEMPORAL_MEMORY_MS = 220;
+        const LED_TEMPORAL_THRESHOLD = 48;
+        const LED_POSE_HOLD_MS = 420;
 
         // --- 歷程紀錄變數 ---
         let commandHistory = [];
@@ -357,20 +365,20 @@
             recoverySteerOut.textContent = `±${recoverySteer.value}`;
             recoveryTimeOut.textContent = `${Number(recoveryTime.value).toFixed(1)}s`;
         }
-        [recoveryThrottle, recoverySteer, recoveryTime].forEach(el => el.addEventListener('input', updateRecoverySliderReadouts));
+        [recoveryThrottle,recoverySteer,recoveryTime].forEach(el=>el.addEventListener('input',updateRecoverySliderReadouts));
         updateRecoverySliderReadouts();
-
         function getRecoverySettings() {
             return {
-                throttle: Math.max(1510, Math.min(1700, Number(recoveryThrottle.value) || 1570)),
-                steerAmp: Math.max(20, Math.min(350, Number(recoverySteer.value) || 120)),
-                maxMs: Math.max(1000, Math.min(15000, (Number(recoveryTime.value) || 4.5) * 1000))
+                throttle: Math.max(1510,Math.min(1700,Number(recoveryThrottle.value)||1570)),
+                steerAmp: Math.max(20,Math.min(350,Number(recoverySteer.value)||120)),
+                maxMs: Math.max(1000,Math.min(15000,(Number(recoveryTime.value)||4.5)*1000))
             };
         }
 
         function setVisionMode(mode) {
             visionMode = mode;
             lastLedPose = null;
+            resetLedTemporalMemory();
             carMissingFrames = 0;
             resetVisualRecovery(false);
 
@@ -409,27 +417,15 @@
         const btnFullscreen = $('btnFullscreen');
         const btnExitFullscreen = $('btnExitFullscreen');
         let isFullscreen = false;
-
         function setCameraFullscreen(enabled) {
             isFullscreen = enabled;
             stageContainer.classList.toggle('stage-fullscreen', enabled);
             btnExitFullscreen.classList.toggle('hidden', !enabled);
             btnFullscreen.textContent = enabled ? '已全螢幕' : '相機全螢幕';
         }
-
-        btnFullscreen.addEventListener('click', (e) => {
-            e.stopPropagation();
-            setCameraFullscreen(true);
-        });
-
-        btnExitFullscreen.addEventListener('click', (e) => {
-            e.stopPropagation();
-            setCameraFullscreen(false);
-        });
-
-        document.addEventListener('keydown', (e) => {
-            if(e.key === 'Escape' && isFullscreen) setCameraFullscreen(false);
-        });
+        btnFullscreen.addEventListener('click', (e) => { e.stopPropagation(); setCameraFullscreen(true); });
+        btnExitFullscreen.addEventListener('click', (e) => { e.stopPropagation(); setCameraFullscreen(false); });
+        document.addEventListener('keydown', (e) => { if(e.key === 'Escape' && isFullscreen) setCameraFullscreen(false); });
 
         // ==========================================
         // 1. 藍牙連線邏輯
@@ -494,7 +490,6 @@
 
         function queueBleCommand(command) {
             if (!isConnected || !rxCharacteristic) return;
-            // 永遠只保留最新控制命令；若上一筆還在送，不再啟動第二個 GATT write。
             blePendingCommand = command;
             if (!bleWriteBusy) flushBleCommandQueue();
         }
@@ -513,41 +508,32 @@
                     } catch (e) {
                         bleWriteFailures++;
                         console.warn('BLE UART write failed', e);
-                        // 若期間已有更新的命令，保留更新命令；否則下個 100ms heartbeat 再送目前命令。
                         break;
                     }
                 }
             } finally {
                 bleWriteBusy = false;
-                // write 完成瞬間若又有新命令進來，立即續送，不必等下一個 interval。
-                if (blePendingCommand && isConnected && rxCharacteristic) {
-                    Promise.resolve().then(flushBleCommandQueue);
-                }
+                if (blePendingCommand && isConnected && rxCharacteristic) Promise.resolve().then(flushBleCommandQueue);
             }
         }
 
         function sendDataToMicrobit() {
             const command = formatCommand();
             debugString.textContent = command;
-
-            // 紀錄指令 (若處於自動模式且指令有變化)
-            if (isRecording) {
-                if (command !== lastRecordedCmd) {
-                    const now = new Date();
-                    const ms = now.getMilliseconds().toString().padStart(3, '0');
-                    const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}.${ms}`;
-                    commandHistory.push({ time: timeStr, cmd: command });
-                    lastRecordedCmd = command;
-                }
+            if (isRecording && command !== lastRecordedCmd) {
+                const now = new Date();
+                const ms = now.getMilliseconds().toString().padStart(3,'0');
+                const timeStr = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}.${ms}`;
+                commandHistory.push({time:timeStr,cmd:command});
+                lastRecordedCmd = command;
             }
-
             queueBleCommand(command);
         }
 
         function startSendingData() {
             if (sendInterval) clearInterval(sendInterval);
             sendDataToMicrobit();
-            sendInterval = setInterval(sendDataToMicrobit, 100);
+            sendInterval = setInterval(sendDataToMicrobit,100);
         }
         function stopSendingData() {
             if (sendInterval) clearInterval(sendInterval);
@@ -690,13 +676,10 @@
             btnClearRoute.disabled = !hasRoute;
             btnClearRoute.classList.toggle('opacity-50', !hasRoute);
             btnClearRoute.classList.toggle('cursor-not-allowed', !hasRoute);
-
-            // 自駕途中不允許復原，避免正在追蹤的索引被改動；仍可繼續點擊追加新點。
             const canUndo = hasRoute && !autoMode;
             btnUndoWaypoint.disabled = !canUndo;
             btnUndoWaypoint.classList.toggle('opacity-50', !canUndo);
             btnUndoWaypoint.classList.toggle('cursor-not-allowed', !canUndo);
-
             btnAutoStart.disabled = !hasRoute || autoMode;
             btnAutoStart.classList.toggle('opacity-50', !hasRoute || autoMode);
             btnAutoStart.classList.toggle('cursor-not-allowed', !hasRoute || autoMode);
@@ -728,58 +711,30 @@
             setRouteButtonState();
             updateRouteStatus();
         }
-
-        btnClearRoute.addEventListener('click', () => clearRoute());
-
+        btnClearRoute.addEventListener('click', clearRoute);
         btnUndoWaypoint.addEventListener('click', () => {
-            if(autoMode || routePoints.length === 0) return;
+            if(autoMode || !routePoints.length) return;
             routePoints.pop();
             routeCompleted = false;
-            if(routePoints.length === 0) {
-                currentRouteIndex = 0;
-                targetPoint = null;
-            } else {
-                currentRouteIndex = Math.min(currentRouteIndex, routePoints.length - 1);
-                targetPoint = routePoints[currentRouteIndex];
-            }
-            setRouteButtonState();
-            updateRouteStatus('已復原');
+            if(!routePoints.length) { currentRouteIndex=0; targetPoint=null; }
+            else { currentRouteIndex=Math.min(currentRouteIndex, routePoints.length-1); targetPoint=routePoints[currentRouteIndex]; }
+            setRouteButtonState(); updateRouteStatus('已復原');
         });
 
         stageContainer.addEventListener('click', (e) => {
             if(!cvReady || !video.srcObject) return;
-
-            // 計算 object-fit: contain 下真實影像區域與座標
-            const rect = stageContainer.getBoundingClientRect();
-            const scaleX = video.videoWidth / rect.width;
-            const scaleY = video.videoHeight / rect.height;
-            const scale = Math.max(scaleX, scaleY);
-            const drawW = video.videoWidth / scale;
-            const drawH = video.videoHeight / scale;
-            const offsetX = (rect.width - drawW) / 2;
-            const offsetY = (rect.height - drawH) / 2;
-            const clickX = (e.clientX - rect.left - offsetX) * scale;
-            const clickY = (e.clientY - rect.top - offsetY) * scale;
-
-            if(clickX >= 0 && clickX <= video.videoWidth && clickY >= 0 && clickY <= video.videoHeight) {
-                const newPoint = { x: clickX, y: clickY };
-
-                // 若上一條路徑已跑完，繼續點擊會從終點向後追加，而不是清掉舊路徑。
-                if(routeCompleted && !autoMode) {
-                    routeCompleted = false;
-                    currentRouteIndex = routePoints.length;
-                }
-
-                routePoints.push(newPoint);
-                if(routePoints.length === 1) {
-                    currentRouteIndex = 0;
-                    targetPoint = routePoints[0];
-                } else if(!targetPoint && currentRouteIndex < routePoints.length) {
-                    targetPoint = routePoints[currentRouteIndex];
-                }
-
-                setRouteButtonState();
-                updateRouteStatus(`新增 P${routePoints.length}`);
+            const rect=stageContainer.getBoundingClientRect();
+            const scale=Math.max(video.videoWidth/rect.width, video.videoHeight/rect.height);
+            const drawW=video.videoWidth/scale, drawH=video.videoHeight/scale;
+            const offsetX=(rect.width-drawW)/2, offsetY=(rect.height-drawH)/2;
+            const clickX=(e.clientX-rect.left-offsetX)*scale;
+            const clickY=(e.clientY-rect.top-offsetY)*scale;
+            if(clickX>=0 && clickX<=video.videoWidth && clickY>=0 && clickY<=video.videoHeight) {
+                if(routeCompleted && !autoMode) { routeCompleted=false; currentRouteIndex=routePoints.length; }
+                routePoints.push({x:clickX,y:clickY});
+                if(routePoints.length===1) { currentRouteIndex=0; targetPoint=routePoints[0]; }
+                else if(!targetPoint && currentRouteIndex<routePoints.length) targetPoint=routePoints[currentRouteIndex];
+                setRouteButtonState(); updateRouteStatus(`新增 P${routePoints.length}`);
             }
         });
 
@@ -788,12 +743,8 @@
         // ==========================================
         function startAutoMode() {
             if(routePoints.length === 0) return;
-
-            // 完整路徑跑完後再次按「開始」＝從 P1 重跑；手動停止後則保留目前進度。
             if(routeCompleted || !targetPoint || currentRouteIndex >= routePoints.length) {
-                currentRouteIndex = 0;
-                routeCompleted = false;
-                targetPoint = routePoints[0];
+                currentRouteIndex=0; routeCompleted=false; targetPoint=routePoints[0];
             }
             autoMode = true;
             carMissingFrames = 0;
@@ -873,7 +824,6 @@
             recoveryStartedAt = 0;
             recoveryNextStepAt = 0;
             recoveryLastAction = -1;
-
             if(restoreModeDisplay && wasSearching && autoMode) {
                 modeDisplay.textContent = "自動導航中";
                 modeDisplay.className = "text-yellow-400 font-bold animate-pulse";
@@ -882,53 +832,39 @@
 
         function runVisualRecovery() {
             if(!autoMode || visionMode === 'led') return;
-
             const now = performance.now();
             if(!visualLostSince) visualLostSince = now;
-
-            // 極短暫遮擋先不干預，沿用上一個導航命令，避免畫面抖一下就改動車子。
             if(now - visualLostSince < RECOVERY_GRACE_MS) return;
-
             if(!recoveryActive) {
                 recoveryActive = true;
                 recoveryStartedAt = now;
                 recoveryNextStepAt = 0;
                 recoveryLastAction = -1;
             }
-
             const cfg = getRecoverySettings();
             const elapsed = now - recoveryStartedAt;
             if(elapsed >= cfg.maxMs) {
-                steeringVal = 1500;
-                throttleVal = 1500;
+                steeringVal = 1500; throttleVal = 1500;
                 $('leftValDisplay').textContent = 'SEARCH STOP';
                 $('rightValDisplay').textContent = 'SEARCH STOP';
                 modeDisplay.textContent = '標記遺失｜安全停止';
                 modeDisplay.className = 'text-red-400 font-bold';
                 return;
             }
-
             if(now < recoveryNextStepAt) return;
-
-            // 小幅搜尋動作。滑桿值可在搜尋進行中即時生效。
-            // steering < 1500 = 左、> 1500 = 右；throttle > 1500 = 前進。
-            const turnThrottle = Math.max(1510, cfg.throttle - 20);
+            const turnThrottle=Math.max(1510,cfg.throttle-20);
             const actions = [
                 { steering:1500, throttle:cfg.throttle, label:'前進', short:'F' },
                 { steering:1500-cfg.steerAmp, throttle:turnThrottle, label:'左前', short:'L' },
                 { steering:1500+cfg.steerAmp, throttle:turnThrottle, label:'右前', short:'R' }
             ];
-
             let idx;
             do { idx = Math.floor(Math.random() * actions.length); }
             while(actions.length > 1 && idx === recoveryLastAction);
             recoveryLastAction = idx;
-
             const a = actions[idx];
-            steeringVal = a.steering;
-            throttleVal = a.throttle;
+            steeringVal = a.steering; throttleVal = a.throttle;
             recoveryNextStepAt = now + RECOVERY_STEP_MS;
-
             $('leftValDisplay').textContent = `找標記:${a.short} ${throttleVal}`;
             $('rightValDisplay').textContent = `找標記:${a.short} ${steeringVal}`;
             modeDisplay.textContent = `搜尋 ArUco：${a.label}`;
@@ -952,102 +888,60 @@
         function chooseNavigationPose(arucoPose, ledPose) {
             if(visionMode === 'aruco') return arucoPose;
             if(visionMode === 'led') return ledPose;
-
-            // 同時模式：正常情況 ArUco 提供中心，LED 提供車頭方向。
-            // 但 LED 在反光、曝光或只抓到部分燈點時可能瞬間翻轉 180°。
-            // 此時用 ArUco 朝向做交叉驗證；差異太大就先相信 ArUco，避免有 ID 卻被錯誤 LED 方向卡住。
             if(arucoPose && ledPose) {
-                const a1 = Math.atan2(arucoPose.heading.y, arucoPose.heading.x);
-                const a2 = Math.atan2(ledPose.heading.y, ledPose.heading.x);
-                const diff = Math.abs(Math.atan2(Math.sin(a2-a1), Math.cos(a2-a1))) * 180 / Math.PI;
-                if(diff <= BOTH_HEADING_MAX_DIFF_DEG) {
-                    return {
-                        center: {x: arucoPose.center.x, y: arucoPose.center.y},
-                        heading: {x: ledPose.heading.x, y: ledPose.heading.y},
-                        source: 'ArUco+LED',
-                        corners: arucoPose.corners
-                    };
+                const a1=Math.atan2(arucoPose.heading.y,arucoPose.heading.x);
+                const a2=Math.atan2(ledPose.heading.y,ledPose.heading.x);
+                const diff=Math.abs(Math.atan2(Math.sin(a2-a1),Math.cos(a2-a1)))*180/Math.PI;
+                if(diff<=BOTH_HEADING_MAX_DIFF_DEG) {
+                    return {center:{x:arucoPose.center.x,y:arucoPose.center.y},heading:{x:ledPose.heading.x,y:ledPose.heading.y},source:'ArUco+LED',corners:arucoPose.corners};
                 }
-                return {
-                    center: {x: arucoPose.center.x, y: arucoPose.center.y},
-                    heading: {x: arucoPose.heading.x, y: arucoPose.heading.y},
-                    source: 'ArUco(LED reject)',
-                    corners: arucoPose.corners,
-                    ledRejected: true
-                };
+                return {center:{x:arucoPose.center.x,y:arucoPose.center.y},heading:{x:arucoPose.heading.x,y:arucoPose.heading.y},source:'ArUco(LED reject)',corners:arucoPose.corners,ledRejected:true};
             }
             return ledPose || arucoPose;
         }
 
         function updateStallDetector(vehiclePose, dist, diffAngle, normalSteer, normalThrottle) {
-            const now = performance.now();
-            const cx = vehiclePose.center.x, cy = vehiclePose.center.y;
-
-            // 正在脫困加力：短時間內直接覆蓋正常導航油門，但仍朝目標方向轉。
+            const now=performance.now();
+            const cx=vehiclePose.center.x, cy=vehiclePose.center.y;
             if(now < stallBoostUntil) {
-                const cfg = getRecoverySettings();
-                const boostThrottle = Math.min(1700, Math.max(1580, cfg.throttle + 30));
-                const steerAmp = Math.max(80, cfg.steerAmp);
-                let steer = normalSteer;
-                if(Math.abs(diffAngle) > 0.25) {
-                    steer = 1500 + Math.sign(diffAngle) * Math.max(steerAmp, Math.min(300, Math.abs(normalSteer - 1500)));
-                } else if(Math.abs(steer - 1500) < 35) {
-                    // 幾乎正對目標卻不動時，給非常小的左右擾動，避免輪胎或馬達停在死區。
-                    const dir = (stallBoostCount % 2 === 0) ? 1 : -1;
-                    steer = 1500 + dir * Math.min(steerAmp, 100);
+                const cfg=getRecoverySettings();
+                const boostThrottle=Math.min(1700,Math.max(1580,cfg.throttle+30));
+                const steerAmp=Math.max(80,cfg.steerAmp);
+                let steer=normalSteer;
+                if(Math.abs(diffAngle)>0.25) steer=1500+Math.sign(diffAngle)*Math.max(steerAmp,Math.min(300,Math.abs(normalSteer-1500)));
+                else if(Math.abs(steer-1500)<35) {
+                    const dir=(stallBoostCount%2===0)?1:-1;
+                    steer=1500+dir*Math.min(steerAmp,100);
                 }
-                stallBoostSteer = Math.max(1000, Math.min(2000, Math.round(steer)));
-                modeDisplay.textContent = `有 ID｜防卡脫困 ${stallBoostCount}`;
-                modeDisplay.className = 'text-orange-400 font-bold animate-pulse';
-                return {steer: stallBoostSteer, throttle: boostThrottle, boosting:true};
+                stallBoostSteer=Math.max(1000,Math.min(2000,Math.round(steer)));
+                modeDisplay.textContent=`有 ID｜防卡脫困 ${stallBoostCount}`;
+                modeDisplay.className='text-orange-400 font-bold animate-pulse';
+                return {steer:stallBoostSteer,throttle:boostThrottle,boosting:true};
             }
-
-            // 剛脫困結束先等待車體反應，避免連續誤觸發。
-            if(now < stallCooldownUntil) {
-                return {steer: normalSteer, throttle: normalThrottle, boosting:false};
-            }
-
-            if(!stallAnchor) {
-                stallAnchor = {x:cx, y:cy, dist, time:now, routeIndex:currentRouteIndex};
-                return {steer: normalSteer, throttle: normalThrottle, boosting:false};
-            }
-
-            // 換導航點後重新建立基準。
-            if(stallAnchor.routeIndex !== currentRouteIndex) {
-                stallAnchor = {x:cx, y:cy, dist, time:now, routeIndex:currentRouteIndex};
-                return {steer: normalSteer, throttle: normalThrottle, boosting:false};
-            }
-
-            if(now - stallAnchor.time >= STALL_CHECK_MS) {
-                const moved = Math.hypot(cx - stallAnchor.x, cy - stallAnchor.y);
-                const progressed = stallAnchor.dist - dist;
-
-                if(dist > WAYPOINT_REACHED_PX + 25 && moved < STALL_MIN_MOVE_PX && progressed < STALL_MIN_PROGRESS_PX) {
+            if(now < stallCooldownUntil) return {steer:normalSteer,throttle:normalThrottle,boosting:false};
+            if(!stallAnchor) { stallAnchor={x:cx,y:cy,dist,time:now,routeIndex:currentRouteIndex}; return {steer:normalSteer,throttle:normalThrottle,boosting:false}; }
+            if(stallAnchor.routeIndex!==currentRouteIndex) { stallAnchor={x:cx,y:cy,dist,time:now,routeIndex:currentRouteIndex}; return {steer:normalSteer,throttle:normalThrottle,boosting:false}; }
+            if(now-stallAnchor.time>=STALL_CHECK_MS) {
+                const moved=Math.hypot(cx-stallAnchor.x,cy-stallAnchor.y);
+                const progressed=stallAnchor.dist-dist;
+                if(dist>WAYPOINT_REACHED_PX+25 && moved<STALL_MIN_MOVE_PX && progressed<STALL_MIN_PROGRESS_PX) {
                     stallBoostCount++;
-                    stallBoostUntil = now + STALL_BOOST_MS;
-                    stallCooldownUntil = stallBoostUntil + STALL_COOLDOWN_MS;
-                    stallAnchor = {x:cx, y:cy, dist, time:now, routeIndex:currentRouteIndex};
-                    const cfg = getRecoverySettings();
-                    const boostThrottle = Math.min(1700, Math.max(1580, cfg.throttle + 30));
-                    let steer = normalSteer;
-                    if(Math.abs(diffAngle) < 0.25 && Math.abs(steer - 1500) < 35) {
-                        steer = 1500 + ((stallBoostCount % 2) ? 1 : -1) * Math.min(Math.max(80,cfg.steerAmp),100);
-                    }
-                    stallBoostSteer = Math.max(1000, Math.min(2000, Math.round(steer)));
-                    modeDisplay.textContent = `有 ID｜防卡脫困 ${stallBoostCount}`;
-                    modeDisplay.className = 'text-orange-400 font-bold animate-pulse';
-                    return {steer: stallBoostSteer, throttle: boostThrottle, boosting:true};
+                    stallBoostUntil=now+STALL_BOOST_MS;
+                    stallCooldownUntil=stallBoostUntil+STALL_COOLDOWN_MS;
+                    stallAnchor={x:cx,y:cy,dist,time:now,routeIndex:currentRouteIndex};
+                    const cfg=getRecoverySettings();
+                    const boostThrottle=Math.min(1700,Math.max(1580,cfg.throttle+30));
+                    let steer=normalSteer;
+                    if(Math.abs(diffAngle)<0.25 && Math.abs(steer-1500)<35) steer=1500+((stallBoostCount%2)?1:-1)*Math.min(Math.max(80,cfg.steerAmp),100);
+                    stallBoostSteer=Math.max(1000,Math.min(2000,Math.round(steer)));
+                    modeDisplay.textContent=`有 ID｜防卡脫困 ${stallBoostCount}`;
+                    modeDisplay.className='text-orange-400 font-bold animate-pulse';
+                    return {steer:stallBoostSteer,throttle:boostThrottle,boosting:true};
                 }
-
-                // 有正常移動或有朝目標進展：更新監看基準。
-                stallAnchor = {x:cx, y:cy, dist, time:now, routeIndex:currentRouteIndex};
-                if(autoMode && !recoveryActive) {
-                    modeDisplay.textContent = '自動導航中';
-                    modeDisplay.className = 'text-yellow-400 font-bold animate-pulse';
-                }
+                stallAnchor={x:cx,y:cy,dist,time:now,routeIndex:currentRouteIndex};
+                if(autoMode && !recoveryActive) { modeDisplay.textContent='自動導航中'; modeDisplay.className='text-yellow-400 font-bold animate-pulse'; }
             }
-
-            return {steer: normalSteer, throttle: normalThrottle, boosting:false};
+            return {steer:normalSteer,throttle:normalThrottle,boosting:false};
         }
 
         function calculateNavigationPose(vehiclePose) {
@@ -1064,66 +958,48 @@
             const carAngle = Math.atan2(carVecY, carVecX);
             const tgtAngle = Math.atan2(tgtVecY, tgtVecX);
 
-            // 角度差 (-PI 到 PI)
             const diffAngle = Math.atan2(Math.sin(tgtAngle - carAngle), Math.cos(tgtAngle - carAngle));
             const dist = Math.hypot(tgtVecX, tgtVecY);
 
-            // 抵達目前路徑點：不是最後一點就自動切換到下一點，不停車。
             if (dist < WAYPOINT_REACHED_PX) {
-                const reachedNo = currentRouteIndex + 1;
-                if(currentRouteIndex < routePoints.length - 1) {
+                const reachedNo=currentRouteIndex+1;
+                if(currentRouteIndex < routePoints.length-1) {
                     currentRouteIndex++;
-                    targetPoint = routePoints[currentRouteIndex];
+                    targetPoint=routePoints[currentRouteIndex];
                     resetStallDetector();
-                    updateRouteStatus(`已到達 P${reachedNo}，前往 P${currentRouteIndex + 1}`);
+                    updateRouteStatus(`已到達 P${reachedNo}，前往 P${currentRouteIndex+1}`);
                     return;
                 }
-
-                // 最後一點才結束整條自動導航。
-                routeCompleted = true;
-                currentRouteIndex = routePoints.length;
-                targetPoint = null;
-                targetStatus.innerHTML = `<span class="text-green-400 font-bold">路徑完成！已抵達 P${routePoints.length}</span>`;
-                disableAutoMode();
-                setRouteButtonState();
-                return;
+                routeCompleted=true;
+                currentRouteIndex=routePoints.length;
+                targetPoint=null;
+                targetStatus.innerHTML=`<span class="text-green-400 font-bold">路徑完成！已抵達 P${routePoints.length}</span>`;
+                disableAutoMode(); setRouteButtonState(); return;
             }
 
-            // PID 比例控制 (Steering) - 保留原先控制參數
             let steer = 1500 + (diffAngle * (180/Math.PI)) * 4.5;
             steer = Math.max(1000, Math.min(2000, steer));
 
-            // Throttle 控制 - 保留原先控制參數
             let throttle = 1500;
             const absDiff = Math.abs(diffAngle);
             if (absDiff < 0.3) {
                 throttle = 1650;
             } else if (absDiff > 1.2) {
-                // 舊版在大角度時把油門設成 1500，只適合可原地旋轉的底盤。
-                // 一般前輪轉向自走車會因此「有 ID、有路徑、但完全不動」。
-                // 改成低速向前 + 大轉向，讓車有實際位移並把車頭轉向目標。
                 throttle = NAV_SHARP_TURN_THROTTLE;
                 if(steer > 1500) steer = 1800; else steer = 1200;
             } else {
                 throttle = 1580;
             }
-
-            // 導航中只要尚未抵達目標，就不允許因控制分支意外留下中立油門。
             if(dist >= WAYPOINT_REACHED_PX && throttle <= 1500) throttle = NAV_SHARP_TURN_THROTTLE;
 
-            // 即使 ID 一直存在，也監看畫面中的車中心是否真的有移動。
-            // 若 1.2 秒內幾乎沒有位移/進展，短暫使用「搜尋油門」+30 作為脫困油門。
-            const antiStall = updateStallDetector(vehiclePose, dist, diffAngle, steer, throttle);
-            steer = antiStall.steer;
-            throttle = antiStall.throttle;
-
-            steeringVal = Math.round(steer);
-            throttleVal = Math.round(throttle);
+            const antiStall=updateStallDetector(vehiclePose,dist,diffAngle,steer,throttle);
+            steer=antiStall.steer; throttle=antiStall.throttle;
+            steeringVal=Math.round(steer);
+            throttleVal=Math.round(throttle);
             $('leftValDisplay').textContent = antiStall.boosting ? `BOOST:${throttleVal}` : `A:${throttleVal}`;
             $('rightValDisplay').textContent = antiStall.boosting ? `BOOST:${steeringVal}` : `A:${steeringVal}`;
         }
 
-        // 保留舊函式名稱，若其他程式仍呼叫 corners 也能正常工作。
         function calculateNavigation(corners) {
             const pose = markerToNavPose({corners});
             calculateNavigationPose(pose);
@@ -1142,7 +1018,6 @@
             let gray=null, bin=null, contours=null, hier=null, K=null, dist=null;
             let targetMarker = null;
 
-            // ---------- ArUco 辨識 ----------
             if(visionMode !== 'led') {
                 gray=new cv.Mat(); bin=new cv.Mat();
                 cv.cvtColor(rgba,gray,cv.COLOR_RGBA2GRAY);
@@ -1174,7 +1049,6 @@
                 const results=[];
                 for(const c of kept){ const r=decode(gray,c.pts); if(r) results.push(r); }
 
-                // 參數設定與 3D 估算
                 const fov=+$('fov').value*Math.PI/180, f=(W/2)/Math.tan(fov/2), ms=+$('msize').value||50;
                 K=cv.matFromArray(3,3,cv.CV_64F,[f,0,W/2, 0,f,H/2, 0,0,1]);
                 dist=cv.Mat.zeros(4,1,cv.CV_64F);
@@ -1191,7 +1065,6 @@
                 updateReadout(null);
             }
 
-            // ---------- micro:bit 5x5 LED 方向辨識 ----------
             let ledPose = null;
             if(visionMode !== 'aruco') {
                 ledPose = detectLedPose(rgba,pw,ph,scale);
@@ -1212,7 +1085,6 @@
             const arucoPose = targetMarker ? markerToNavPose(targetMarker) : null;
             const navPose = chooseNavigationPose(arucoPose, ledPose);
 
-            // --- 目標繪製與自駕邏輯觸發 ---
             drawTargetAndLine(navPose);
 
             if(navPose) {
@@ -1224,7 +1096,6 @@
                 stallAnchor = null;
                 if(autoMode) {
                     if(visionMode === 'led') {
-                        // LED-only 模式沒有 ArUco 可搜尋，沿用原本安全停止邏輯。
                         if(carMissingFrames > 5) {
                             steeringVal = 1500;
                             throttleVal = 1500;
@@ -1232,22 +1103,16 @@
                             $('rightValDisplay').textContent = `LOST`;
                         }
                     } else {
-                        // ArUco 或 ArUco+LED 模式：短暫遺失時用小幅隨機動作重新找標記。
                         runVisualRecovery();
                     }
                 }
             }
 
             if(autoMode && performance.now() < stallBoostUntil && navPose) {
-                const bx = navPose.center.x, by = navPose.center.y;
-                ctx.save();
-                ctx.font = `700 ${Math.max(16, overlay.width/45)}px "IBM Plex Mono",monospace`;
-                ctx.fillStyle = '#ff9f43';
-                ctx.strokeStyle = 'rgba(0,0,0,.8)';
-                ctx.lineWidth = 4;
-                ctx.strokeText('BOOST', bx + 20, by - 20);
-                ctx.fillText('BOOST', bx + 20, by - 20);
-                ctx.restore();
+                const bx=navPose.center.x, by=navPose.center.y;
+                ctx.save(); ctx.font=`700 ${Math.max(16,overlay.width/45)}px "IBM Plex Mono",monospace`;
+                ctx.fillStyle='#ff9f43'; ctx.strokeStyle='rgba(0,0,0,.8)'; ctx.lineWidth=4;
+                ctx.strokeText('BOOST',bx+20,by-20); ctx.fillText('BOOST',bx+20,by-20); ctx.restore();
             }
 
             if(K) K.delete(); if(dist) dist.delete();
@@ -1255,126 +1120,179 @@
             rgba.delete();
         }
 
-        // =========================================================
-        // micro:bit 5x5 LED 圖形：
-        // 0 1 1 1 0
-        // 0 0 1 0 0
-        // 0 0 0 0 0
-        // 1 0 0 0 1
-        // 1 0 0 0 1
-        // 前端橫向分布較窄、後端較寬，因此可消除 180° 方向歧義。
-        // =========================================================
+        function resetLedTemporalMemory() {
+            ledTemporalStrength = null;
+            ledTemporalW = 0;
+            ledTemporalH = 0;
+            ledTemporalLastTime = 0;
+            ledLastRawPose = null;
+            ledLastRawTime = 0;
+        }
+
         function detectLedPose(rgba,pw,ph,scale) {
+            const now = performance.now();
             const rThreshold = Math.max(80, Math.min(250, +$('ledRThreshold').value || 140));
             const dominance = Math.max(10, Math.min(120, +$('ledDominance').value || 30));
-            const mask = new cv.Mat(ph,pw,cv.CV_8UC1);
-            const md = mask.data, d = rgba.data;
+            const pixelCount = pw * ph;
 
-            // micro:bit LED 為紅色。以 R 亮度 + R/G、R/B 色差做遮罩，
-            // 可避開 ArUco 的白色區域，兩種標記可同時出現在畫面。
-            for(let i=0,j=0;i<d.length;i+=4,j++) {
-                const r=d[i], g=d[i+1], b=d[i+2];
-                md[j] = (r >= rThreshold && (r-g) >= dominance && (r-b) >= dominance) ? 255 : 0;
+            // 影像尺寸變更（例如手機旋轉、切換相機）時重新建立時間融合緩衝區。
+            if(!ledTemporalStrength || ledTemporalW !== pw || ledTemporalH !== ph) {
+                ledTemporalStrength = new Uint8Array(pixelCount);
+                ledTemporalW = pw;
+                ledTemporalH = ph;
+                ledTemporalLastTime = now;
+                ledLastRawPose = null;
+                ledLastRawTime = 0;
             }
 
+            // 依實際經過時間衰減，而不是固定「幾幀」，所以 30/60 fps 都有相近效果。
+            const dt = Math.max(1, Math.min(100, now - (ledTemporalLastTime || now)));
+            ledTemporalLastTime = now;
+            const decay = Math.max(1, Math.round(255 * dt / LED_TEMPORAL_MEMORY_MS));
+
+            const temporalMask = new cv.Mat(ph,pw,cv.CV_8UC1);
+            const md = temporalMask.data;
+            const d = rgba.data;
+
+            for(let i=0,j=0; i<d.length; i+=4,j++) {
+                const r=d[i], g=d[i+1], b=d[i+2];
+                const isLedRed = r >= rThreshold && (r-g) >= dominance && (r-b) >= dominance;
+
+                if(isLedRed) {
+                    // 只要這一幀有看到，就把該像素充滿；下一些影格即使因掃描熄滅也會短暫保留。
+                    ledTemporalStrength[j] = 255;
+                } else {
+                    const v = ledTemporalStrength[j] - decay;
+                    ledTemporalStrength[j] = v > 0 ? v : 0;
+                }
+                md[j] = ledTemporalStrength[j] >= LED_TEMPORAL_THRESHOLD ? 255 : 0;
+            }
+
+            // 將同一列相鄰 LED 的光暈接起來。空白的第 3 列距離較大，所以前/後兩團仍會分開。
             const clean = new cv.Mat();
-            const kernel = cv.Mat.ones(3,3,cv.CV_8U);
-            cv.morphologyEx(mask,clean,cv.MORPH_CLOSE,kernel);
+            let kSize = Math.round(Math.min(pw,ph) / 95);
+            kSize = Math.max(3, Math.min(9, kSize));
+            if(kSize % 2 === 0) kSize++;
+            const kernel = cv.Mat.ones(kSize,kSize,cv.CV_8U);
+            cv.morphologyEx(temporalMask,clean,cv.MORPH_CLOSE,kernel);
 
             const cs = new cv.MatVector(), hh = new cv.Mat();
             cv.findContours(clean,cs,hh,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);
+
             const blobs=[];
-            const maxBlobArea = pw*ph*0.02;
+            const minArea = Math.max(2, pw*ph*0.000006);
+            const maxArea = pw*ph*0.018;
+
             for(let i=0;i<cs.size();i++) {
                 const cnt=cs.get(i);
                 const area=cv.contourArea(cnt);
-                if(area>=1.5 && area<=maxBlobArea) {
+                if(area >= minArea && area <= maxArea) {
                     const m=cv.moments(cnt,false);
                     if(Math.abs(m.m00)>1e-6) {
                         const rect=cv.boundingRect(cnt);
-                        // 排除極端細長或佔畫面太大的紅色物件。
-                        if(rect.width < pw*0.28 && rect.height < ph*0.28) {
-                            blobs.push({x:m.m10/m.m00,y:m.m01/m.m00,area,rect});
+                        if(rect.width < pw*0.24 && rect.height < ph*0.24) {
+                            // 由二階矩估計團塊的長軸。車尾 5 顆一排（甚至只拍到其中一排）會形成很清楚的橫向長軸。
+                            const cxx=Math.max(0,m.mu20/m.m00);
+                            const cyy=Math.max(0,m.mu02/m.m00);
+                            const cxy=m.mu11/m.m00;
+                            const tr=cxx+cyy;
+                            const disc=Math.sqrt(Math.max(0,(cxx-cyy)*(cxx-cyy)+4*cxy*cxy));
+                            const l1=Math.max(0,(tr+disc)/2);
+                            const l2=Math.max(0,(tr-disc)/2);
+                            const theta=0.5*Math.atan2(2*cxy,cxx-cyy);
+                            blobs.push({
+                                x:m.m10/m.m00,
+                                y:m.m01/m.m00,
+                                area,
+                                rect,
+                                theta,
+                                major:Math.max(2,4*Math.sqrt(l1)),
+                                minor:Math.max(1,4*Math.sqrt(l2))
+                            });
                         }
                     }
                 }
                 cnt.delete();
             }
-            mask.delete(); clean.delete(); kernel.delete(); cs.delete(); hh.delete();
 
-            if(blobs.length < 3) return null;
+            temporalMask.delete(); clean.delete(); kernel.delete(); cs.delete(); hh.delete();
 
-            // 優先保留面積較大的 12 個紅色亮點，避免背景零星紅光干擾。
-            blobs.sort((a,b)=>b.area-a.area);
-            let pts = blobs.slice(0,12);
-            let front=null, rear=null, confidence=0;
+            // 不再要求「單一影格一定看齊所有 14 顆」。
+            // 從時間融合後的團塊中找：較小的前團 + 較大的後團。
+            let best = null;
+            for(let i=0;i<blobs.length;i++) {
+                for(let j=i+1;j<blobs.length;j++) {
+                    let front=blobs[i], rear=blobs[j];
+                    if(front.area > rear.area) [front,rear] = [rear,front];
 
-            // LED 點彼此清楚時，通常會看到 6~10 個獨立亮點（理想為 8 點）。
-            if(pts.length >= 6) {
-                // 若候選超過 10 個，以距離整體中位面積較近者優先。
-                if(pts.length > 10) pts = pts.slice(0,10);
+                    const ratio = rear.area / Math.max(1,front.area);
+                    if(ratio < 1.12 || ratio > 9.0) continue;
 
-                let mx=0,my=0;
-                pts.forEach(p=>{mx+=p.x;my+=p.y;}); mx/=pts.length; my/=pts.length;
-                let cxx=0,cyy=0,cxy=0;
-                pts.forEach(p=>{const x=p.x-mx,y=p.y-my;cxx+=x*x;cyy+=y*y;cxy+=x*y;});
-                cxx/=pts.length; cyy/=pts.length; cxy/=pts.length;
+                    let hx=front.x-rear.x, hy=front.y-rear.y;
+                    const dist=Math.hypot(hx,hy);
+                    if(dist < Math.max(4,Math.min(pw,ph)*0.012)) continue;
 
-                // PCA 主軸。此圖形在車身前後方向的變異略大於左右方向。
-                const theta=0.5*Math.atan2(2*cxy,cxx-cyy);
-                let ux=Math.cos(theta), uy=Math.sin(theta);
-                const vx=-uy, vy=ux;
-                const projected=pts.map(p=>({p,long:(p.x-mx)*ux+(p.y-my)*uy,cross:(p.x-mx)*vx+(p.y-my)*vy}));
-                const sortedLong=projected.map(o=>o.long).sort((a,b)=>a-b);
-                const median=sortedLong[Math.floor(sortedLong.length/2)];
-                let low=projected.filter(o=>o.long<=median), high=projected.filter(o=>o.long>median);
-                if(low.length<2 || high.length<2) return null;
+                    // 圖案幾何：兩團中心距離大約是車尾寬度的一部分，不應離得非常遠。
+                    const sizeRef=Math.max(rear.major,front.major,6);
+                    if(dist > Math.max(sizeRef*3.4,Math.min(pw,ph)*0.18)) continue;
+                    hx/=dist; hy/=dist;
 
-                const crossVar = arr => {
-                    const m=arr.reduce((s,o)=>s+o.cross,0)/arr.length;
-                    return arr.reduce((s,o)=>s+(o.cross-m)*(o.cross-m),0)/arr.length;
-                };
-                const vLow=crossVar(low), vHigh=crossVar(high);
+                    // 車尾團的長軸應大致與行進方向垂直。
+                    const rvx=Math.cos(rear.theta), rvy=Math.sin(rear.theta);
+                    const parallel=Math.abs(hx*rvx + hy*rvy); // 0 最佳，1 最差
+                    const perpendicularScore=1-parallel;
 
-                // 圖形前端（T 型）左右分布較窄；後端雙柱左右分布較寬。
-                const frontGroup = vLow < vHigh ? low : high;
-                const rearGroup  = vLow < vHigh ? high : low;
-                const avg = arr => ({
-                    x:arr.reduce((s,o)=>s+o.p.x,0)/arr.length,
-                    y:arr.reduce((s,o)=>s+o.p.y,0)/arr.length
-                });
-                front=avg(frontGroup); rear=avg(rearGroup);
-                confidence=Math.abs(vHigh-vLow)/(vHigh+vLow+1);
-            } else {
-                // 距離較遠或失焦時，相鄰 LED 可能融合成 3~5 個區塊。
-                // 最大區塊通常是前端 4 顆 LED 的 T 型，另外兩側是後端雙柱。
-                const sorted=pts.slice().sort((a,b)=>b.area-a.area);
-                const f=sorted[0];
-                const rest=sorted.slice(1);
-                if(rest.length<2) return null;
-                // 後端取離前端最遠的兩個區塊。
-                rest.sort((a,b)=>Math.hypot(b.x-f.x,b.y-f.y)-Math.hypot(a.x-f.x,a.y-f.y));
-                front={x:f.x,y:f.y};
-                rear={x:(rest[0].x+rest[1].x)/2,y:(rest[0].y+rest[1].y)/2};
-                confidence=Math.min(1,f.area/Math.max(1,(rest[0].area+rest[1].area)/2)/2);
+                    // 完整圖案面積比約 10:4=2.5；掃描缺列時允許很大的彈性。
+                    const ratioScore=Math.max(0,1-Math.abs(Math.log(ratio/2.5))/Math.log(7));
+                    const widthScore=Math.max(0,Math.min(1,rear.major/Math.max(1,front.major)-0.85));
+                    let score=2.2*perpendicularScore + 1.5*ratioScore + 0.8*widthScore;
+
+                    const cx=(front.x+rear.x)/2, cy=(front.y+rear.y)/2;
+
+                    // 已經鎖定後，偏好與上一個 LED 位置/方向連續的候選，避免紅色車殼或反光突然搶走追蹤。
+                    if(ledLastRawPose && now-ledLastRawTime < 900) {
+                        const oldCx=ledLastRawPose.center.x*scale;
+                        const oldCy=ledLastRawPose.center.y*scale;
+                        const centerJump=Math.hypot(cx-oldCx,cy-oldCy);
+                        score += Math.max(0,1.5-centerJump/Math.max(15,dist*1.8));
+                        const oldHx=ledLastRawPose.heading.x, oldHy=ledLastRawPose.heading.y;
+                        const dot=Math.max(-1,Math.min(1,hx*oldHx+hy*oldHy));
+                        score += 1.5*Math.max(0,dot);
+                    }
+
+                    if(!best || score>best.score) best={front,rear,hx,hy,cx,cy,score,dist};
+                }
             }
 
-            let hx=front.x-rear.x, hy=front.y-rear.y;
-            const len=Math.hypot(hx,hy);
-            if(len < 5) return null;
-            hx/=len; hy/=len;
+            if(best) {
+                const pose={
+                    center:{x:best.cx/scale,y:best.cy/scale},
+                    heading:{x:best.hx,y:best.hy},
+                    front:{x:best.front.x/scale,y:best.front.y/scale},
+                    rear:{x:best.rear.x/scale,y:best.rear.y/scale},
+                    source:'LED-temporal',
+                    pointCount:blobs.length,
+                    confidence:Math.max(0,Math.min(1,best.score/5)),
+                    held:false
+                };
+                ledLastRawPose=pose;
+                ledLastRawTime=now;
+                return pose;
+            }
 
-            // 以所有 LED 候選的平均位置作車體中心；轉回原始影片座標。
-            let cx=0,cy=0; pts.forEach(p=>{cx+=p.x;cy+=p.y;}); cx/=pts.length; cy/=pts.length;
-            return {
-                center:{x:cx/scale,y:cy/scale},
-                heading:{x:hx,y:hy},
-                front:{x:front.x/scale,y:front.y/scale},
-                rear:{x:rear.x/scale,y:rear.y/scale},
-                source:'LED',
-                pointCount:pts.length,
-                confidence
-            };
+            // rolling shutter 若這一刻只拍到「前團」或「後團」，短時間沿用上一個可靠姿態，
+            // 不要讓導航因 1~數幀缺列就突然認為 LED 消失。
+            if(ledLastRawPose && now-ledLastRawTime <= LED_POSE_HOLD_MS) {
+                const age=(now-ledLastRawTime)/LED_POSE_HOLD_MS;
+                return {
+                    ...ledLastRawPose,
+                    source:'LED-temporal-hold',
+                    confidence:Math.max(0.15,ledLastRawPose.confidence*(1-age)),
+                    held:true
+                };
+            }
+
+            return null;
         }
 
         function smoothLedPose(pose) {
@@ -1486,72 +1404,36 @@
 
         function drawTargetAndLine(marker) {
             if(routePoints.length === 0) return;
-
-            // 先畫完整規劃路徑，讓所有導航點與順序一目了然。
             if(routePoints.length > 1) {
-                ctx.save();
-                ctx.lineWidth = Math.max(2, overlay.width / 500);
-                ctx.strokeStyle = autoMode ? 'rgba(78,163,255,0.75)' : 'rgba(255,255,255,0.35)';
-                ctx.setLineDash([8, 6]);
-                ctx.beginPath();
-                routePoints.forEach((p,i) => i ? ctx.lineTo(p.x,p.y) : ctx.moveTo(p.x,p.y));
-                ctx.stroke();
-                ctx.setLineDash([]);
-                ctx.restore();
+                ctx.save(); ctx.lineWidth=Math.max(2,overlay.width/500);
+                ctx.strokeStyle=autoMode?'rgba(78,163,255,0.75)':'rgba(255,255,255,0.35)';
+                ctx.setLineDash([8,6]); ctx.beginPath();
+                routePoints.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));
+                ctx.stroke(); ctx.setLineDash([]); ctx.restore();
             }
-
-            const time = Date.now() / 200;
-            const pulse = 14 + Math.sin(time) * 4;
-            const labelSize = Math.max(13, overlay.width / 55);
-            ctx.font = `700 ${labelSize}px "IBM Plex Mono", monospace`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-
-            routePoints.forEach((p, i) => {
-                const isPast = routeCompleted || i < currentRouteIndex;
-                const isCurrent = !routeCompleted && i === currentRouteIndex;
-                const radius = isCurrent ? pulse : 11;
-
-                ctx.beginPath();
-                ctx.arc(p.x, p.y, radius, 0, Math.PI*2);
-                ctx.lineWidth = isCurrent ? 4 : 2;
-                ctx.strokeStyle = isPast ? '#22e07a' : (isCurrent ? '#ff5a5a' : 'rgba(255,255,255,0.75)');
-                ctx.stroke();
-
-                ctx.fillStyle = isPast ? 'rgba(34,224,122,0.85)' : (isCurrent ? 'rgba(255,90,90,0.9)' : 'rgba(0,0,0,0.75)');
-                ctx.beginPath();
-                ctx.arc(p.x, p.y, Math.max(9, radius-5), 0, Math.PI*2);
-                ctx.fill();
-
-                ctx.fillStyle = '#ffffff';
-                ctx.fillText(String(i + 1), p.x, p.y + 0.5);
+            const time=Date.now()/200, pulse=14+Math.sin(time)*4, labelSize=Math.max(13,overlay.width/55);
+            ctx.font=`700 ${labelSize}px "IBM Plex Mono", monospace`; ctx.textAlign='center'; ctx.textBaseline='middle';
+            routePoints.forEach((p,i)=>{
+                const isPast=routeCompleted||i<currentRouteIndex, isCurrent=!routeCompleted&&i===currentRouteIndex;
+                const radius=isCurrent?pulse:11;
+                ctx.beginPath(); ctx.arc(p.x,p.y,radius,0,Math.PI*2); ctx.lineWidth=isCurrent?4:2;
+                ctx.strokeStyle=isPast?'#22e07a':(isCurrent?'#ff5a5a':'rgba(255,255,255,0.75)'); ctx.stroke();
+                ctx.fillStyle=isPast?'rgba(34,224,122,0.85)':(isCurrent?'rgba(255,90,90,0.9)':'rgba(0,0,0,0.75)');
+                ctx.beginPath(); ctx.arc(p.x,p.y,Math.max(9,radius-5),0,Math.PI*2); ctx.fill();
+                ctx.fillStyle='#fff'; ctx.fillText(String(i+1),p.x,p.y+0.5);
             });
-
-            ctx.textAlign = 'start';
-            ctx.textBaseline = 'alphabetic';
-
-            // 車輛只連到「目前」導航點；完整路徑已在上方以折線表示。
+            ctx.textAlign='start'; ctx.textBaseline='alphabetic';
             if(marker && targetPoint) {
-                let cx, cy;
-                if(marker.center) {
-                    cx = marker.center.x; cy = marker.center.y;
-                } else if(marker.corners) {
-                    cx = (marker.corners[0][0] + marker.corners[1][0] + marker.corners[2][0] + marker.corners[3][0]) / 4;
-                    cy = (marker.corners[0][1] + marker.corners[1][1] + marker.corners[2][1] + marker.corners[3][1]) / 4;
-                } else return;
-
-                ctx.strokeStyle = autoMode ? '#4ea3ff' : 'rgba(255, 255, 255, 0.3)';
-                ctx.lineWidth = autoMode ? 4 : 2;
-                ctx.beginPath();
-                ctx.moveTo(cx, cy);
-                ctx.lineTo(targetPoint.x, targetPoint.y);
-                ctx.stroke();
-
+                let cx,cy;
+                if(marker.center) { cx=marker.center.x; cy=marker.center.y; }
+                else if(marker.corners) { cx=marker.corners.reduce((a,p)=>a+p[0],0)/4; cy=marker.corners.reduce((a,p)=>a+p[1],0)/4; }
+                else return;
+                ctx.strokeStyle=autoMode?'#4ea3ff':'rgba(255,255,255,0.3)'; ctx.lineWidth=autoMode?4:2;
+                ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(targetPoint.x,targetPoint.y); ctx.stroke();
                 if(autoMode) {
-                    const dist = Math.hypot(targetPoint.x - cx, targetPoint.y - cy);
-                    ctx.fillStyle = '#4ea3ff';
-                    ctx.font = `600 16px "IBM Plex Mono"`;
-                    ctx.fillText(`P${currentRouteIndex + 1}/${routePoints.length}  Dist: ${dist.toFixed(0)}`, (cx+targetPoint.x)/2 + 10, (cy+targetPoint.y)/2);
+                    const dist=Math.hypot(targetPoint.x-cx,targetPoint.y-cy);
+                    ctx.fillStyle='#4ea3ff'; ctx.font=`600 16px "IBM Plex Mono"`;
+                    ctx.fillText(`P${currentRouteIndex+1}/${routePoints.length}  Dist: ${dist.toFixed(0)}`,(cx+targetPoint.x)/2+10,(cy+targetPoint.y)/2);
                 }
             }
         }
