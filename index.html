@@ -117,6 +117,7 @@
             <div class="stage" id="stageContainer">
                 <button id="btnExitFullscreen" class="hidden absolute top-2 left-2 bg-gray-800/80 border border-gray-500 text-white px-3 py-1 rounded text-sm z-30 hover:bg-gray-700 transition cursor-pointer">離開全螢幕</button>
                 <div class="absolute top-2 right-2 flex gap-2 z-30">
+                    <button id="btnTrajectoryOverlay" class="hidden bg-gray-800/85 border border-yellow-500/70 text-yellow-300 px-3 py-1 rounded text-sm transition hover:bg-yellow-600/30 cursor-pointer shadow-lg shadow-black/50">軌跡</button>
                     <button id="btnAutoScanOverlay" disabled class="bg-cyan-600/80 border border-cyan-400 text-white px-3 py-1 rounded text-sm opacity-50 cursor-not-allowed transition hover:bg-cyan-500 disabled:hover:bg-cyan-600/80 cursor-pointer shadow-lg shadow-black/50">自動掃描</button>
                     <button id="btnAutoStartOverlay" disabled class="bg-green-600/80 border border-green-500 text-white px-3 py-1 rounded text-sm opacity-50 cursor-not-allowed transition hover:bg-green-500 disabled:hover:bg-green-600/80 cursor-pointer shadow-lg shadow-black/50">開始</button>
                     <button id="btnAutoStopOverlay" disabled class="bg-red-600/80 border border-red-500 text-white px-3 py-1 rounded text-sm opacity-50 cursor-not-allowed transition hover:bg-red-500 disabled:hover:bg-red-600/80 cursor-pointer shadow-lg shadow-black/50">停止</button>
@@ -283,6 +284,17 @@
         let targetPoint = null;
         let carScreenPos = null;
         let carMissingFrames = 0;
+
+        // --- 實際行走軌跡（全螢幕「軌跡」按鈕切換顯示） ---
+        let traveledTrajectory = [];
+        let trajectoryVisible = false;
+        let trajectoryLastSampleAt = 0;
+        let trajectoryLastSeenAt = 0;
+        const TRAJECTORY_MIN_SAMPLE_MS = 70;
+        const TRAJECTORY_MIN_MOVE_PX = 4;
+        const TRAJECTORY_BREAK_GAP_MS = 800;
+        const TRAJECTORY_MAX_POINTS = 5000;
+
         const WAYPOINT_REACHED_PX = 40;              // 最终点停车半径
         const INTERMEDIATE_WAYPOINT_REACHED_PX = 40; // 中间点也使用较精确的小半径，不再提前 58px 切点
         const WAYPOINT_CONFIRM_FRAMES = 3;            // 连续 3 个有效姿态帧都在当前编号点内才确认到达
@@ -376,6 +388,7 @@
         const btnAutoStop = $('btnAutoStop');
         const btnAutoScanRoute = $('btnAutoScanRoute');
         const btnAutoScanOverlay = $('btnAutoScanOverlay');
+        const btnTrajectoryOverlay = $('btnTrajectoryOverlay');
         const btnAutoStartOverlay = $('btnAutoStartOverlay');
         const btnAutoStopOverlay = $('btnAutoStopOverlay');
         const targetStatus = $('targetStatus');
@@ -454,14 +467,29 @@
         const btnFullscreen = $('btnFullscreen');
         const btnExitFullscreen = $('btnExitFullscreen');
         let isFullscreen = false;
+        function updateTrajectoryButtonStyle() {
+            if(trajectoryVisible) {
+                btnTrajectoryOverlay.className = 'bg-yellow-500/90 border border-yellow-200 text-black px-3 py-1 rounded text-sm font-semibold transition hover:bg-yellow-400 cursor-pointer shadow-lg shadow-black/50';
+            } else {
+                btnTrajectoryOverlay.className = 'bg-gray-800/85 border border-yellow-500/70 text-yellow-300 px-3 py-1 rounded text-sm transition hover:bg-yellow-600/30 cursor-pointer shadow-lg shadow-black/50';
+            }
+            if(!isFullscreen) btnTrajectoryOverlay.classList.add('hidden');
+        }
+
         function setCameraFullscreen(enabled) {
             isFullscreen = enabled;
             stageContainer.classList.toggle('stage-fullscreen', enabled);
             btnExitFullscreen.classList.toggle('hidden', !enabled);
             btnFullscreen.textContent = enabled ? '已全螢幕' : '相機全螢幕';
+            updateTrajectoryButtonStyle();
         }
         btnFullscreen.addEventListener('click', (e) => { e.stopPropagation(); setCameraFullscreen(true); });
         btnExitFullscreen.addEventListener('click', (e) => { e.stopPropagation(); setCameraFullscreen(false); });
+        btnTrajectoryOverlay.addEventListener('click', (e) => {
+            e.stopPropagation();
+            trajectoryVisible = !trajectoryVisible;
+            updateTrajectoryButtonStyle();
+        });
         document.addEventListener('keydown', (e) => { if(e.key === 'Escape' && isFullscreen) setCameraFullscreen(false); });
 
         // ==========================================
@@ -999,6 +1027,7 @@
                     }
 
                     if(autoMode) disableAutoMode();
+                    clearTraveledTrajectory();
                     routePoints=planned;
                     currentRouteIndex=0;
                     routeCompleted=false;
@@ -1055,6 +1084,7 @@
         }
 
         function clearRoute() {
+            clearTraveledTrajectory();
             routePoints = [];
             currentRouteIndex = 0;
             routeCompleted = false;
@@ -1095,11 +1125,76 @@
             }
         });
 
+        function clearTraveledTrajectory() {
+            traveledTrajectory = [];
+            trajectoryLastSampleAt = 0;
+            trajectoryLastSeenAt = 0;
+        }
+
+        function recordTraveledTrajectory(vehiclePose) {
+            if(!autoMode || !vehiclePose || !vehiclePose.center) return;
+            const now = performance.now();
+            const p = {x:vehiclePose.center.x, y:vehiclePose.center.y, t:now, breakBefore:false};
+            const last = traveledTrajectory[traveledTrajectory.length-1];
+
+            if(!last) {
+                traveledTrajectory.push(p);
+                trajectoryLastSampleAt = now;
+                trajectoryLastSeenAt = now;
+                return;
+            }
+
+            const gap = trajectoryLastSeenAt ? now - trajectoryLastSeenAt : 0;
+            trajectoryLastSeenAt = now;
+            const moved = Math.hypot(p.x-last.x, p.y-last.y);
+            const maxJump = Math.max(120, overlay.width*0.13);
+
+            // 影像曾長時間看不到車或位置突然跳很遠時，開新線段，不畫一條錯誤長直線。
+            if(gap > TRAJECTORY_BREAK_GAP_MS || moved > maxJump) {
+                p.breakBefore = true;
+                traveledTrajectory.push(p);
+                trajectoryLastSampleAt = now;
+                return;
+            }
+
+            if(now-trajectoryLastSampleAt < TRAJECTORY_MIN_SAMPLE_MS || moved < TRAJECTORY_MIN_MOVE_PX) return;
+            traveledTrajectory.push(p);
+            trajectoryLastSampleAt = now;
+            if(traveledTrajectory.length > TRAJECTORY_MAX_POINTS) traveledTrajectory.splice(0, traveledTrajectory.length-TRAJECTORY_MAX_POINTS);
+        }
+
+        function drawTraveledTrajectory() {
+            if(!trajectoryVisible || traveledTrajectory.length < 2) return;
+            ctx.save();
+            ctx.lineJoin='round';
+            ctx.lineCap='round';
+            ctx.lineWidth=Math.max(3,overlay.width/360);
+            ctx.strokeStyle='rgba(250,204,21,0.92)';
+            ctx.shadowColor='rgba(0,0,0,0.75)';
+            ctx.shadowBlur=3;
+            ctx.beginPath();
+            traveledTrajectory.forEach((p,i)=>{
+                if(i===0 || p.breakBefore) ctx.moveTo(p.x,p.y);
+                else ctx.lineTo(p.x,p.y);
+            });
+            ctx.stroke();
+            ctx.shadowBlur=0;
+
+            const first=traveledTrajectory[0], last=traveledTrajectory[traveledTrajectory.length-1];
+            ctx.fillStyle='#22e07a';
+            ctx.beginPath(); ctx.arc(first.x,first.y,Math.max(4,overlay.width/300),0,Math.PI*2); ctx.fill();
+            ctx.fillStyle='#facc15';
+            ctx.beginPath(); ctx.arc(last.x,last.y,Math.max(5,overlay.width/260),0,Math.PI*2); ctx.fill();
+            ctx.restore();
+        }
+
         // ==========================================
         // 5. 自動導航邏輯
         // ==========================================
         function startAutoMode() {
             if(routePoints.length === 0) return;
+            const restartingCompletedRoute = routeCompleted || currentRouteIndex >= routePoints.length;
+            if(restartingCompletedRoute) clearTraveledTrajectory();
             if(routeCompleted || !targetPoint || currentRouteIndex >= routePoints.length) {
                 currentRouteIndex=0; routeCompleted=false; targetPoint=routePoints[0];
             }
@@ -1495,6 +1590,8 @@
             const arucoPose = targetMarker ? markerToNavPose(targetMarker) : null;
             const navPose = chooseNavigationPose(arucoPose, ledPose);
 
+            if(navPose) recordTraveledTrajectory(navPose);
+            drawTraveledTrajectory();
             drawTargetAndLine(navPose);
 
             if(navPose) {
