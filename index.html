@@ -283,7 +283,14 @@
         let targetPoint = null;
         let carScreenPos = null;
         let carMissingFrames = 0;
-        const WAYPOINT_REACHED_PX = 40;
+        const WAYPOINT_REACHED_PX = 40;              // 最终点严格停车半径
+        const INTERMEDIATE_WAYPOINT_REACHED_PX = 58; // 中间点采用较宽松的“通过”半径，避免卡在点旁
+        const WAYPOINT_PASS_NEAR_PX = 74;            // 曾接近到此距离后若开始明显远离，也视为已通过
+        const WAYPOINT_PASS_AWAY_PX = 12;
+        const WAYPOINT_HANDOFF_MS = 480;             // 切换到下一点后短暂保持前进，避免中立油门卡住
+        let waypointClosestDist = Infinity;
+        let waypointClosestIndex = -1;
+        let waypointHandoffUntil = 0;
 
         // --- ArUco / 視覺短暫遺失時的自動搜尋 ---
         let visualLostSince = 0;
@@ -793,7 +800,7 @@
             const rowSpacing=Math.max(10,Math.round(Math.min(w,h)*0.095));
             const minRun=Math.max(8,Math.round(rowSpacing*0.8));
             // 即使安全遮罩已經內縮，掃描線端點再往內退一點，避免車頭/車尾轉彎時擦到障礙邊緣。
-            const endpointInset=Math.max(3,Math.round(rowSpacing*0.32));
+            const endpointInset=Math.max(4,Math.round(rowSpacing*0.48));
             const rows=[];
 
             for(let y=minY+Math.floor(rowSpacing/2);y<=maxY;y+=rowSpacing) {
@@ -895,8 +902,8 @@
 
             // 第一层安全区：画面四周直接禁止规划。
             // 靠近镜头边缘通常透视变形更大、ArUco 更容易离开视野，也更可能接近墙面/家具。
-            const frameMarginX=Math.max(8,Math.round(sw*0.08));
-            const frameMarginY=Math.max(8,Math.round(sh*0.08));
+            const frameMarginX=Math.max(10,Math.round(sw*0.11));
+            const frameMarginY=Math.max(10,Math.round(sh*0.11));
             const interiorMask=new Uint8Array(largest.mask);
             for(let y=0;y<sh;y++) {
                 for(let x=0;x<sw;x++) {
@@ -910,12 +917,13 @@
             const interiorLargest=largestConnectedMask(interiorMask,sw,sh);
             if(interiorLargest.count < sw*sh*0.08) return null;
 
-            // 第二层安全区：对可行同色区域进一步向内侵蚀。
-            // 由原来的约 1.8% 提高到 3.5% 短边，让路线离墙脚/家具/颜色边界更远。
+            // 第二层安全区：严格要求导航点周围整块邻域都属于同一个大色块。
+            // 使用矩形 erosion（而不是椭圆）意味着周围任何方向出现异色/障碍/边界，该位置都会被删除。
+            // 同时把内缩从 3.5% 提高到约 5.5% 的画面短边。
             let comp=new cv.Mat(sh,sw,cv.CV_8UC1); comp.data.set(interiorLargest.mask);
             let safe=new cv.Mat();
-            const safetyRadius=Math.max(4,Math.round(Math.min(sw,sh)*0.035));
-            const ks=cv.getStructuringElement(cv.MORPH_ELLIPSE,new cv.Size(safetyRadius*2+1,safetyRadius*2+1));
+            const safetyRadius=Math.max(6,Math.round(Math.min(sw,sh)*0.055));
+            const ks=cv.getStructuringElement(cv.MORPH_RECT,new cv.Size(safetyRadius*2+1,safetyRadius*2+1));
             cv.erode(comp,safe,ks);
             let safeMask=new Uint8Array(safe.data);
             comp.delete();safe.delete();ks.delete();
@@ -995,8 +1003,11 @@
                     currentRouteIndex=0;
                     routeCompleted=false;
                     targetPoint=routePoints[0]||null;
+                    waypointClosestIndex=0;
+                    waypointClosestDist=Infinity;
+                    waypointHandoffUntil=0;
                     setRouteButtonState();
-                    targetStatus.innerHTML=`<span class="text-cyan-300 font-bold">自動掃描 ${routePoints.length} 點</span> · 安全區 ${(region.safeCoverage*100).toFixed(0)}% · 邊緣已留白`;
+                    targetStatus.innerHTML=`<span class="text-cyan-300 font-bold">自動掃描 ${routePoints.length} 點</span> · 嚴格安全區 ${(region.safeCoverage*100).toFixed(0)}% · 異色周邊不排點`;
                 } catch(err) {
                     console.warn('Auto scan route planning failed:',err);
                     targetStatus.innerHTML=`<span class="text-red-400">掃描規劃失敗：${err.message}</span>`;
@@ -1048,6 +1059,9 @@
             currentRouteIndex = 0;
             routeCompleted = false;
             targetPoint = null;
+            waypointClosestDist = Infinity;
+            waypointClosestIndex = -1;
+            waypointHandoffUntil = 0;
             if(autoMode) disableAutoMode();
             setRouteButtonState();
             updateRouteStatus();
@@ -1087,6 +1101,9 @@
             if(routeCompleted || !targetPoint || currentRouteIndex >= routePoints.length) {
                 currentRouteIndex=0; routeCompleted=false; targetPoint=routePoints[0];
             }
+            waypointClosestIndex=currentRouteIndex;
+            waypointClosestDist=Infinity;
+            waypointHandoffUntil=0;
             autoMode = true;
             carMissingFrames = 0;
             resetVisualRecovery(false);
@@ -1265,7 +1282,8 @@
             if(now-stallAnchor.time>=STALL_CHECK_MS) {
                 const moved=Math.hypot(cx-stallAnchor.x,cy-stallAnchor.y);
                 const progressed=stallAnchor.dist-dist;
-                if(dist>WAYPOINT_REACHED_PX+25 && moved<STALL_MIN_MOVE_PX && progressed<STALL_MIN_PROGRESS_PX) {
+                // 原本 >65px 才会 BOOST，会留下 40~65px 的近点死区；改成离目标 >48px 就能防卡。
+                if(dist>48 && moved<STALL_MIN_MOVE_PX && progressed<STALL_MIN_PROGRESS_PX) {
                     stallBoostCount++;
                     stallBoostUntil=now+STALL_BOOST_MS;
                     stallCooldownUntil=stallBoostUntil+STALL_COOLDOWN_MS;
@@ -1302,18 +1320,50 @@
             const diffAngle = Math.atan2(Math.sin(tgtAngle - carAngle), Math.cos(tgtAngle - carAngle));
             const dist = Math.hypot(tgtVecX, tgtVecY);
 
-            if (dist < WAYPOINT_REACHED_PX) {
+            // 中间点是“经过点”，不要求车中心精确压到 40 px 内；最后一点才严格停车。
+            const isIntermediate = currentRouteIndex < routePoints.length - 1;
+            const reachRadius = isIntermediate ? INTERMEDIATE_WAYPOINT_REACHED_PX : WAYPOINT_REACHED_PX;
+
+            if(waypointClosestIndex !== currentRouteIndex) {
+                waypointClosestIndex = currentRouteIndex;
+                waypointClosestDist = dist;
+            } else if(dist < waypointClosestDist) {
+                waypointClosestDist = dist;
+            }
+
+            // 若曾经已经很接近该中间点，随后距离明显变大，代表车已经从点旁通过，不再强迫回头找点。
+            const passedBy = isIntermediate && waypointClosestDist <= WAYPOINT_PASS_NEAR_PX && dist >= waypointClosestDist + WAYPOINT_PASS_AWAY_PX;
+
+            if (dist < reachRadius || passedBy) {
                 const reachedNo=currentRouteIndex+1;
-                if(currentRouteIndex < routePoints.length-1) {
+                if(isIntermediate) {
                     currentRouteIndex++;
                     targetPoint=routePoints[currentRouteIndex];
+                    waypointClosestIndex=currentRouteIndex;
+                    waypointClosestDist=Infinity;
+                    waypointHandoffUntil=performance.now()+WAYPOINT_HANDOFF_MS;
                     resetStallDetector();
-                    updateRouteStatus(`已到達 P${reachedNo}，前往 P${currentRouteIndex+1}`);
+
+                    // 在切点这一帧立即产生下一点的转向与前进命令，避免 return 后沿用上一帧的 1500 中立油门。
+                    const nx=targetPoint.x-cx, ny=targetPoint.y-cy;
+                    const nextAngle=Math.atan2(ny,nx);
+                    const nextDiff=Math.atan2(Math.sin(nextAngle-carAngle),Math.cos(nextAngle-carAngle));
+                    let nextSteer=1500+(nextDiff*(180/Math.PI))*4.5;
+                    nextSteer=Math.max(1120,Math.min(1880,nextSteer));
+                    const cfg=getRecoverySettings();
+                    steeringVal=Math.round(nextSteer);
+                    throttleVal=Math.round(Math.min(1680,Math.max(1620,cfg.throttle+20)));
+                    $('leftValDisplay').textContent=`NEXT:${throttleVal}`;
+                    $('rightValDisplay').textContent=`NEXT:${steeringVal}`;
+                    updateRouteStatus(passedBy ? `已通過 P${reachedNo}，前往 P${currentRouteIndex+1}` : `已到達 P${reachedNo}，前往 P${currentRouteIndex+1}`);
                     return;
                 }
                 routeCompleted=true;
                 currentRouteIndex=routePoints.length;
                 targetPoint=null;
+                waypointClosestDist=Infinity;
+                waypointClosestIndex=-1;
+                waypointHandoffUntil=0;
                 targetStatus.innerHTML=`<span class="text-green-400 font-bold">路徑完成！已抵達 P${routePoints.length}</span>`;
                 disableAutoMode(); setRouteButtonState(); return;
             }
@@ -1332,6 +1382,12 @@
                 throttle = 1580;
             }
             if(dist >= WAYPOINT_REACHED_PX && throttle <= 1500) throttle = NAV_SHARP_TURN_THROTTLE;
+
+            // 切换中间点后的短暂前进脉冲：即使下一点角度很大，也不会刚切点就停在原地。
+            if(performance.now() < waypointHandoffUntil) {
+                const cfg=getRecoverySettings();
+                throttle=Math.max(throttle,Math.min(1680,Math.max(1620,cfg.throttle+20)));
+            }
 
             const antiStall=updateStallDetector(vehiclePose,dist,diffAngle,steer,throttle);
             steer=antiStall.steer; throttle=antiStall.throttle;
