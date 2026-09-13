@@ -117,6 +117,7 @@
             <div class="stage" id="stageContainer">
                 <button id="btnExitFullscreen" class="hidden absolute top-2 left-2 bg-gray-800/80 border border-gray-500 text-white px-3 py-1 rounded text-sm z-30 hover:bg-gray-700 transition cursor-pointer">離開全螢幕</button>
                 <div class="absolute top-2 right-2 flex gap-2 z-30">
+                    <button id="btnAutoScanOverlay" disabled class="bg-cyan-600/80 border border-cyan-400 text-white px-3 py-1 rounded text-sm opacity-50 cursor-not-allowed transition hover:bg-cyan-500 disabled:hover:bg-cyan-600/80 cursor-pointer shadow-lg shadow-black/50">自動掃描</button>
                     <button id="btnAutoStartOverlay" disabled class="bg-green-600/80 border border-green-500 text-white px-3 py-1 rounded text-sm opacity-50 cursor-not-allowed transition hover:bg-green-500 disabled:hover:bg-green-600/80 cursor-pointer shadow-lg shadow-black/50">開始</button>
                     <button id="btnAutoStopOverlay" disabled class="bg-red-600/80 border border-red-500 text-white px-3 py-1 rounded text-sm opacity-50 cursor-not-allowed transition hover:bg-red-500 disabled:hover:bg-red-600/80 cursor-pointer shadow-lg shadow-black/50">停止</button>
                 </div>
@@ -367,6 +368,7 @@
         const btnAutoStart = $('btnAutoStart');
         const btnAutoStop = $('btnAutoStop');
         const btnAutoScanRoute = $('btnAutoScanRoute');
+        const btnAutoScanOverlay = $('btnAutoScanOverlay');
         const btnAutoStartOverlay = $('btnAutoStartOverlay');
         const btnAutoStopOverlay = $('btnAutoStopOverlay');
         const targetStatus = $('targetStatus');
@@ -692,6 +694,8 @@
                 $('btnCam').className='bg-green-600/20 border border-green-500 text-green-400 px-3 py-1.5 rounded text-sm';
                 btnAutoScanRoute.disabled = false;
                 btnAutoScanRoute.classList.remove('opacity-50','cursor-not-allowed');
+                btnAutoScanOverlay.disabled = false;
+                btnAutoScanOverlay.classList.remove('opacity-50','cursor-not-allowed');
                 loop();
             }catch(e){ alert('無法開啟相機：'+e.message); }
         };
@@ -788,6 +792,8 @@
             // 約 12~18 條掃描帶，通常會得到 20~40 個主導航點。
             const rowSpacing=Math.max(10,Math.round(Math.min(w,h)*0.095));
             const minRun=Math.max(8,Math.round(rowSpacing*0.8));
+            // 即使安全遮罩已經內縮，掃描線端點再往內退一點，避免車頭/車尾轉彎時擦到障礙邊緣。
+            const endpointInset=Math.max(3,Math.round(rowSpacing*0.32));
             const rows=[];
 
             for(let y=minY+Math.floor(rowSpacing/2);y<=maxY;y+=rowSpacing) {
@@ -799,7 +805,10 @@
                     const b=x-1;
                     if(b>=a && b-a+1>=minRun && (!best || b-a > best.b-best.a)) best={a,b,y};
                 }
-                if(best) rows.push(best);
+                if(best) {
+                    const a2=best.a+endpointInset, b2=best.b-endpointInset;
+                    if(b2-a2+1>=minRun) rows.push({a:a2,b:b2,y:best.y});
+                }
             }
             if(!rows.length) return [];
 
@@ -884,16 +893,48 @@
             }
             if(largest.count < sw*sh*0.12) return null;
 
-            // 安全收缩：路线不要贴着桌脚、柜子和同色区域边界走。
-            let comp=new cv.Mat(sh,sw,cv.CV_8UC1); comp.data.set(largest.mask);
+            // 第一层安全区：画面四周直接禁止规划。
+            // 靠近镜头边缘通常透视变形更大、ArUco 更容易离开视野，也更可能接近墙面/家具。
+            const frameMarginX=Math.max(8,Math.round(sw*0.08));
+            const frameMarginY=Math.max(8,Math.round(sh*0.08));
+            const interiorMask=new Uint8Array(largest.mask);
+            for(let y=0;y<sh;y++) {
+                for(let x=0;x<sw;x++) {
+                    if(x<frameMarginX || x>=sw-frameMarginX || y<frameMarginY || y>=sh-frameMarginY) {
+                        interiorMask[y*sw+x]=0;
+                    }
+                }
+            }
+
+            // 去掉边缘后重新取最大连通块，避免留下与主体分离的小碎片。
+            const interiorLargest=largestConnectedMask(interiorMask,sw,sh);
+            if(interiorLargest.count < sw*sh*0.08) return null;
+
+            // 第二层安全区：对可行同色区域进一步向内侵蚀。
+            // 由原来的约 1.8% 提高到 3.5% 短边，让路线离墙脚/家具/颜色边界更远。
+            let comp=new cv.Mat(sh,sw,cv.CV_8UC1); comp.data.set(interiorLargest.mask);
             let safe=new cv.Mat();
-            const safetyRadius=Math.max(2,Math.round(Math.min(sw,sh)*0.018));
+            const safetyRadius=Math.max(4,Math.round(Math.min(sw,sh)*0.035));
             const ks=cv.getStructuringElement(cv.MORPH_ELLIPSE,new cv.Size(safetyRadius*2+1,safetyRadius*2+1));
             cv.erode(comp,safe,ks);
-            const safeMask=new Uint8Array(safe.data);
+            let safeMask=new Uint8Array(safe.data);
             comp.delete();safe.delete();ks.delete();
 
-            return {mask:safeMask,w:sw,h:sh,coverage:largest.count/(sw*sh)};
+            // 侵蚀后再取一次最大连通区，确保所有规划点都在同一个安全地板区域内。
+            const finalLargest=largestConnectedMask(safeMask,sw,sh);
+            safeMask=finalLargest.mask;
+            if(finalLargest.count < sw*sh*0.05) return null;
+
+            return {
+                mask:safeMask,
+                w:sw,
+                h:sh,
+                coverage:largest.count/(sw*sh),
+                safeCoverage:finalLargest.count/(sw*sh),
+                frameMarginX,
+                frameMarginY,
+                safetyRadius
+            };
         }
 
         function simplifyCoveragePoints(points,minDist,maxPoints=56) {
@@ -910,12 +951,21 @@
             return reduced;
         }
 
+        function setAutoScanButtonsBusy(isBusy) {
+            const buttons=[btnAutoScanRoute,btnAutoScanOverlay];
+            buttons.forEach(btn=>{
+                if(!btn) return;
+                btn.disabled=isBusy || !cvReady || !video.srcObject;
+                btn.textContent=isBusy ? '分析中…' : '自動掃描';
+                btn.classList.toggle('opacity-70', isBusy);
+                btn.classList.toggle('opacity-50', !isBusy && (!cvReady || !video.srcObject));
+                btn.classList.toggle('cursor-not-allowed', !isBusy && (!cvReady || !video.srcObject));
+            });
+        }
+
         function planAutomaticScanRoute() {
-            if(btnAutoScanRoute.disabled || !cvReady || !video.srcObject) return;
-            const oldText=btnAutoScanRoute.textContent;
-            btnAutoScanRoute.disabled=true;
-            btnAutoScanRoute.textContent='分析中…';
-            btnAutoScanRoute.classList.add('opacity-70');
+            if(!cvReady || !video.srcObject || btnAutoScanRoute.disabled || btnAutoScanOverlay.disabled) return;
+            setAutoScanButtonsBusy(true);
 
             // 让按钮先完成一次重绘，再执行影像分析。
             setTimeout(()=>{
@@ -946,19 +996,18 @@
                     routeCompleted=false;
                     targetPoint=routePoints[0]||null;
                     setRouteButtonState();
-                    targetStatus.innerHTML=`<span class="text-cyan-300 font-bold">自動掃描 ${routePoints.length} 點</span> · 同色區域 ${(region.coverage*100).toFixed(0)}%`;
+                    targetStatus.innerHTML=`<span class="text-cyan-300 font-bold">自動掃描 ${routePoints.length} 點</span> · 安全區 ${(region.safeCoverage*100).toFixed(0)}% · 邊緣已留白`;
                 } catch(err) {
                     console.warn('Auto scan route planning failed:',err);
                     targetStatus.innerHTML=`<span class="text-red-400">掃描規劃失敗：${err.message}</span>`;
                 } finally {
-                    btnAutoScanRoute.disabled=false;
-                    btnAutoScanRoute.textContent=oldText;
-                    btnAutoScanRoute.classList.remove('opacity-70');
+                    setAutoScanButtonsBusy(false);
                 }
             },30);
         }
 
         btnAutoScanRoute.addEventListener('click', planAutomaticScanRoute);
+        btnAutoScanOverlay.addEventListener('click', (e) => { e.stopPropagation(); planAutomaticScanRoute(); });
 
         // ==========================================
         // 4. 多點路徑建立 / 編輯
