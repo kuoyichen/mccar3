@@ -134,14 +134,17 @@
                     <span id="targetStatus" class="text-xs text-gray-400">連續點擊畫面可建立多點路徑</span>
                 </div>
                 
-                <div class="flex gap-2">
-                    <button id="btnAutoStart" disabled class="flex-1 bg-green-600/20 border border-green-500 text-green-400 py-2 rounded font-medium opacity-50 cursor-not-allowed transition hover:bg-green-600/30 disabled:hover:bg-green-600/20 text-sm px-1">
+                <div class="grid grid-cols-4 gap-1.5">
+                    <button id="btnAutoStart" disabled class="min-w-0 whitespace-nowrap bg-green-600/20 border border-green-500 text-green-400 py-2 rounded font-medium opacity-50 cursor-not-allowed transition hover:bg-green-600/30 disabled:hover:bg-green-600/20 text-xs px-1">
                         開始
                     </button>
-                    <button id="btnAutoStop" disabled class="flex-1 bg-red-600/20 border border-red-500 text-red-400 py-2 rounded font-medium opacity-50 cursor-not-allowed transition hover:bg-red-600/30 disabled:hover:bg-red-600/20 text-sm px-1">
+                    <button id="btnAutoStop" disabled class="min-w-0 whitespace-nowrap bg-red-600/20 border border-red-500 text-red-400 py-2 rounded font-medium opacity-50 cursor-not-allowed transition hover:bg-red-600/30 disabled:hover:bg-red-600/20 text-xs px-1">
                         停止
                     </button>
-                    <button id="btnViewHistory" class="flex-1 bg-blue-600/20 border border-blue-500 text-blue-400 py-2 rounded font-medium transition hover:bg-blue-600/30 text-sm px-1">
+                    <button id="btnAutoScanRoute" disabled class="min-w-0 whitespace-nowrap bg-cyan-600/15 border border-cyan-600 text-cyan-300 py-2 rounded font-medium opacity-50 cursor-not-allowed transition hover:bg-cyan-600/25 text-xs px-1">
+                        自動掃描
+                    </button>
+                    <button id="btnViewHistory" class="min-w-0 whitespace-nowrap bg-blue-600/20 border border-blue-500 text-blue-400 py-2 rounded font-medium transition hover:bg-blue-600/30 text-xs px-1">
                         觀看歷程
                     </button>
                 </div>
@@ -161,11 +164,11 @@
                 <div class="border-t border-gray-800 pt-3 flex flex-col gap-2">
                     <div class="flex justify-between items-center text-xs">
                         <span class="text-gray-400">方向辨識來源</span>
-                        <span id="visionModeStatus" class="text-cyan-300 data-readout">ArUco + LED</span>
+                        <span id="visionModeStatus" class="text-green-300 data-readout">僅 ArUco</span>
                     </div>
                     <div class="grid grid-cols-3 gap-2">
-                        <button id="btnVisionBoth" class="vision-mode-btn bg-cyan-600/25 border border-cyan-400 text-cyan-300 py-1.5 px-2 rounded text-xs font-medium transition">ArUco + LED</button>
-                        <button id="btnVisionAruco" class="vision-mode-btn bg-gray-900 border border-gray-700 text-gray-400 py-1.5 px-2 rounded text-xs font-medium transition hover:border-green-500">僅 ArUco</button>
+                        <button id="btnVisionBoth" class="vision-mode-btn bg-gray-900 border border-gray-700 text-gray-400 py-1.5 px-2 rounded text-xs font-medium transition hover:border-cyan-500">ArUco + LED</button>
+                        <button id="btnVisionAruco" class="vision-mode-btn bg-green-600/20 border border-green-500 text-green-300 py-1.5 px-2 rounded text-xs font-medium transition">僅 ArUco</button>
                         <button id="btnVisionLed" class="vision-mode-btn bg-gray-900 border border-gray-700 text-gray-400 py-1.5 px-2 rounded text-xs font-medium transition hover:border-red-500">僅 LED</button>
                     </div>
                     <div class="grid grid-cols-2 gap-2 text-xs data-readout bg-black/30 p-2 rounded border border-gray-800">
@@ -307,7 +310,7 @@
         // --- 視覺辨識模式與 LED 方向追蹤 ---
         // both = ArUco 位置 + LED 方向（任一遺失時自動退回另一來源）
         // aruco = 僅使用 ArUco；led = 僅使用 LED 5x5 圖形
-        let visionMode = 'both';
+        let visionMode = 'aruco';
         let lastLedPose = null;
         const LED_SMOOTH_ALPHA = 0.35;
 
@@ -363,6 +366,7 @@
         const modeDisplay = $('modeDisplay');
         const btnAutoStart = $('btnAutoStart');
         const btnAutoStop = $('btnAutoStop');
+        const btnAutoScanRoute = $('btnAutoScanRoute');
         const btnAutoStartOverlay = $('btnAutoStartOverlay');
         const btnAutoStopOverlay = $('btnAutoStopOverlay');
         const targetStatus = $('targetStatus');
@@ -431,6 +435,8 @@
         btnVisionAruco.addEventListener('click', () => setVisionMode('aruco'));
         btnVisionLed.addEventListener('click', () => setVisionMode('led'));
 
+        // 預設辨識方式：僅 ArUco。使用者仍可手動切換到其他模式。
+        setVisionMode('aruco');
         setRouteButtonState();
 
         // ==========================================
@@ -684,11 +690,275 @@
                 video.srcObject=stream; await video.play();
                 $('btnCam').textContent='相機運作中';
                 $('btnCam').className='bg-green-600/20 border border-green-500 text-green-400 px-3 py-1.5 rounded text-sm';
+                btnAutoScanRoute.disabled = false;
+                btnAutoScanRoute.classList.remove('opacity-50','cursor-not-allowed');
                 loop();
             }catch(e){ alert('無法開啟相機：'+e.message); }
         };
 
         function loop(){ if(video.readyState>=2) processFrame(video,video.videoWidth,video.videoHeight); requestAnimationFrame(loop); }
+
+        // ==========================================
+        // 自動規劃同色區域掃描路徑
+        // ==========================================
+        const scanPlanCanvas = document.createElement('canvas');
+        const scanPlanCtx = scanPlanCanvas.getContext('2d', {willReadFrequently:true});
+
+        function rgbToYCbCr(r,g,b) {
+            return {
+                y:  0.299*r + 0.587*g + 0.114*b,
+                cb: 128 - 0.168736*r - 0.331264*g + 0.5*b,
+                cr: 128 + 0.5*r - 0.418688*g - 0.081312*b
+            };
+        }
+
+        function largestConnectedMask(binary,w,h) {
+            const seen = new Uint8Array(w*h);
+            const q = new Int32Array(w*h);
+            let best = [];
+            const dirs = [-1,1,-w,w];
+
+            for(let i=0;i<binary.length;i++) {
+                if(!binary[i] || seen[i]) continue;
+                let head=0,tail=0;
+                q[tail++]=i; seen[i]=1;
+                const comp=[];
+                while(head<tail) {
+                    const p=q[head++]; comp.push(p);
+                    const x=p%w;
+                    // left / right with row boundary protection
+                    if(x>0) { const n=p-1; if(binary[n]&&!seen[n]){seen[n]=1;q[tail++]=n;} }
+                    if(x<w-1) { const n=p+1; if(binary[n]&&!seen[n]){seen[n]=1;q[tail++]=n;} }
+                    if(p>=w) { const n=p-w; if(binary[n]&&!seen[n]){seen[n]=1;q[tail++]=n;} }
+                    if(p<w*(h-1)) { const n=p+w; if(binary[n]&&!seen[n]){seen[n]=1;q[tail++]=n;} }
+                }
+                if(comp.length>best.length) best=comp;
+            }
+            const out=new Uint8Array(w*h);
+            best.forEach(i=>out[i]=255);
+            return {mask:out,count:best.length};
+        }
+
+        function lineInsideMask(mask,w,h,a,b) {
+            const dx=b.x-a.x, dy=b.y-a.y;
+            const steps=Math.max(1,Math.ceil(Math.hypot(dx,dy)*1.5));
+            for(let i=0;i<=steps;i++) {
+                const t=i/steps;
+                const x=Math.round(a.x+dx*t), y=Math.round(a.y+dy*t);
+                if(x<0||x>=w||y<0||y>=h||!mask[y*w+x]) return false;
+            }
+            return true;
+        }
+
+        function bfsMaskPath(mask,w,h,start,goal) {
+            const sx=Math.max(0,Math.min(w-1,Math.round(start.x))), sy=Math.max(0,Math.min(h-1,Math.round(start.y)));
+            const gx=Math.max(0,Math.min(w-1,Math.round(goal.x))), gy=Math.max(0,Math.min(h-1,Math.round(goal.y)));
+            const s=sy*w+sx, g=gy*w+gx;
+            if(!mask[s]||!mask[g]) return null;
+            const prev=new Int32Array(w*h); prev.fill(-2);
+            const q=new Int32Array(w*h); let head=0,tail=0;
+            q[tail++]=s; prev[s]=-1;
+            const dirs=[[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]];
+            while(head<tail) {
+                const p=q[head++];
+                if(p===g) break;
+                const x=p%w,y=(p/w)|0;
+                for(const [dx,dy] of dirs) {
+                    const nx=x+dx,ny=y+dy;
+                    if(nx<0||nx>=w||ny<0||ny>=h) continue;
+                    const n=ny*w+nx;
+                    if(!mask[n]||prev[n]!==-2) continue;
+                    prev[n]=p; q[tail++]=n;
+                }
+            }
+            if(prev[g]===-2) return null;
+            const path=[]; let p=g;
+            while(p!==-1) { path.push({x:p%w,y:(p/w)|0}); p=prev[p]; }
+            path.reverse();
+            return path;
+        }
+
+        function buildCoverageRoute(mask,w,h) {
+            let minX=w,minY=h,maxX=-1,maxY=-1;
+            for(let y=0;y<h;y++) for(let x=0;x<w;x++) if(mask[y*w+x]) {
+                if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;
+            }
+            if(maxX<0) return [];
+
+            // 約 12~18 條掃描帶，通常會得到 20~40 個主導航點。
+            const rowSpacing=Math.max(10,Math.round(Math.min(w,h)*0.095));
+            const minRun=Math.max(8,Math.round(rowSpacing*0.8));
+            const rows=[];
+
+            for(let y=minY+Math.floor(rowSpacing/2);y<=maxY;y+=rowSpacing) {
+                let best=null,x=minX;
+                while(x<=maxX) {
+                    while(x<=maxX&&!mask[y*w+x])x++;
+                    const a=x;
+                    while(x<=maxX&&mask[y*w+x])x++;
+                    const b=x-1;
+                    if(b>=a && b-a+1>=minRun && (!best || b-a > best.b-best.a)) best={a,b,y};
+                }
+                if(best) rows.push(best);
+            }
+            if(!rows.length) return [];
+
+            const route=[];
+            rows.forEach((r,i)=>{
+                const left={x:r.a,y:r.y}, right={x:r.b,y:r.y};
+                const p1=(i%2===0)?left:right;
+                const p2=(i%2===0)?right:left;
+                if(route.length) {
+                    const prev=route[route.length-1];
+                    if(!lineInsideMask(mask,w,h,prev,p1)) {
+                        const connector=bfsMaskPath(mask,w,h,prev,p1);
+                        if(connector && connector.length>2) {
+                            const stride=Math.max(5,Math.round(rowSpacing*0.55));
+                            for(let k=stride;k<connector.length-1;k+=stride) route.push(connector[k]);
+                        }
+                    }
+                }
+                route.push(p1,p2);
+            });
+            return route;
+        }
+
+        function analyzeDominantSameColorRegion() {
+            if(!video.srcObject || video.readyState<2 || !video.videoWidth || !video.videoHeight) return null;
+            const sw=180;
+            const sh=Math.max(100,Math.round(video.videoHeight/video.videoWidth*sw));
+            scanPlanCanvas.width=sw; scanPlanCanvas.height=sh;
+            scanPlanCtx.drawImage(video,0,0,sw,sh);
+            const img=scanPlanCtx.getImageData(0,0,sw,sh);
+            const d=img.data;
+
+            // 以 YCbCr 色度找画面中最常出现的颜色。亮度另行放宽，可容忍地板阴影和反光。
+            const BIN=10, bins=new Map();
+            for(let i=0;i<d.length;i+=4) {
+                const c=rgbToYCbCr(d[i],d[i+1],d[i+2]);
+                if(c.y<28) continue;
+                const kb=Math.round(c.cb/BIN), kr=Math.round(c.cr/BIN);
+                const key=kb+','+kr;
+                bins.set(key,(bins.get(key)||0)+1);
+            }
+            let bestKey=null,bestCount=0;
+            for(const [k,n] of bins) if(n>bestCount){bestKey=k;bestCount=n;}
+            if(!bestKey) return null;
+            const [kb,kr]=bestKey.split(',').map(Number);
+            const cb0=kb*BIN, cr0=kr*BIN;
+
+            const ys=[];
+            for(let i=0;i<d.length;i+=4) {
+                const c=rgbToYCbCr(d[i],d[i+1],d[i+2]);
+                if(Math.hypot(c.cb-cb0,c.cr-cr0)<=16 && c.y>=28) ys.push(c.y);
+            }
+            ys.sort((a,b)=>a-b);
+            const y0=ys.length?ys[(ys.length/2)|0]:150;
+
+            const binary=new Uint8Array(sw*sh);
+            for(let p=0,i=0;p<binary.length;p++,i+=4) {
+                const c=rgbToYCbCr(d[i],d[i+1],d[i+2]);
+                const chroma=Math.hypot(c.cb-cb0,c.cr-cr0);
+                // 色差严格、亮度宽松：同色地板在阴影下仍能连成大片。
+                if(chroma<=18 && Math.abs(c.y-y0)<=92 && c.y>=25) binary[p]=255;
+            }
+
+            // 用 OpenCV 做小尺度开/闭运算，再取最大连通区域。
+            let mat=new cv.Mat(sh,sw,cv.CV_8UC1); mat.data.set(binary);
+            let tmp=new cv.Mat();
+            const k3=cv.getStructuringElement(cv.MORPH_ELLIPSE,new cv.Size(3,3));
+            const k5=cv.getStructuringElement(cv.MORPH_ELLIPSE,new cv.Size(5,5));
+            cv.morphologyEx(mat,tmp,cv.MORPH_OPEN,k3);
+            cv.morphologyEx(tmp,mat,cv.MORPH_CLOSE,k5);
+            const cleaned=new Uint8Array(mat.data);
+            k3.delete();k5.delete();tmp.delete();mat.delete();
+
+            let largest=largestConnectedMask(cleaned,sw,sh);
+            if(largest.count < sw*sh*0.18) {
+                // 如果环境光造成颜色区域太碎，再放宽一次色差。
+                for(let p=0,i=0;p<binary.length;p++,i+=4) {
+                    const c=rgbToYCbCr(d[i],d[i+1],d[i+2]);
+                    binary[p]=(Math.hypot(c.cb-cb0,c.cr-cr0)<=24 && Math.abs(c.y-y0)<=105 && c.y>=22)?255:0;
+                }
+                largest=largestConnectedMask(binary,sw,sh);
+            }
+            if(largest.count < sw*sh*0.12) return null;
+
+            // 安全收缩：路线不要贴着桌脚、柜子和同色区域边界走。
+            let comp=new cv.Mat(sh,sw,cv.CV_8UC1); comp.data.set(largest.mask);
+            let safe=new cv.Mat();
+            const safetyRadius=Math.max(2,Math.round(Math.min(sw,sh)*0.018));
+            const ks=cv.getStructuringElement(cv.MORPH_ELLIPSE,new cv.Size(safetyRadius*2+1,safetyRadius*2+1));
+            cv.erode(comp,safe,ks);
+            const safeMask=new Uint8Array(safe.data);
+            comp.delete();safe.delete();ks.delete();
+
+            return {mask:safeMask,w:sw,h:sh,coverage:largest.count/(sw*sh)};
+        }
+
+        function simplifyCoveragePoints(points,minDist,maxPoints=56) {
+            if(points.length<=2) return points;
+            const out=[points[0]];
+            for(let i=1;i<points.length-1;i++) {
+                const p=points[i], q=out[out.length-1];
+                if(Math.hypot(p.x-q.x,p.y-q.y)>=minDist) out.push(p);
+            }
+            out.push(points[points.length-1]);
+            if(out.length<=maxPoints) return out;
+            const step=(out.length-1)/(maxPoints-1), reduced=[];
+            for(let i=0;i<maxPoints;i++) reduced.push(out[Math.round(i*step)]);
+            return reduced;
+        }
+
+        function planAutomaticScanRoute() {
+            if(btnAutoScanRoute.disabled || !cvReady || !video.srcObject) return;
+            const oldText=btnAutoScanRoute.textContent;
+            btnAutoScanRoute.disabled=true;
+            btnAutoScanRoute.textContent='分析中…';
+            btnAutoScanRoute.classList.add('opacity-70');
+
+            // 让按钮先完成一次重绘，再执行影像分析。
+            setTimeout(()=>{
+                try {
+                    const region=analyzeDominantSameColorRegion();
+                    if(!region) throw new Error('找不到足够大的同色区域');
+                    let lowRoute=buildCoverageRoute(region.mask,region.w,region.h);
+                    if(lowRoute.length<4) throw new Error('同色区域太小，无法生成扫描路线');
+
+                    const sx=video.videoWidth/region.w, sy=video.videoHeight/region.h;
+                    let planned=lowRoute.map(p=>({x:p.x*sx,y:p.y*sy}));
+                    planned=simplifyCoveragePoints(planned,Math.min(video.videoWidth,video.videoHeight)*0.035,56);
+
+                    // 若已经知道车辆位置，从离车较近的一端开始；否则默认从画面较下方的一端开始。
+                    if(planned.length>1) {
+                        if(carScreenPos) {
+                            const d0=Math.hypot(planned[0].x-carScreenPos.x,planned[0].y-carScreenPos.y);
+                            const d1=Math.hypot(planned[planned.length-1].x-carScreenPos.x,planned[planned.length-1].y-carScreenPos.y);
+                            if(d1<d0) planned.reverse();
+                        } else if(planned[planned.length-1].y > planned[0].y) {
+                            planned.reverse();
+                        }
+                    }
+
+                    if(autoMode) disableAutoMode();
+                    routePoints=planned;
+                    currentRouteIndex=0;
+                    routeCompleted=false;
+                    targetPoint=routePoints[0]||null;
+                    setRouteButtonState();
+                    targetStatus.innerHTML=`<span class="text-cyan-300 font-bold">自動掃描 ${routePoints.length} 點</span> · 同色區域 ${(region.coverage*100).toFixed(0)}%`;
+                } catch(err) {
+                    console.warn('Auto scan route planning failed:',err);
+                    targetStatus.innerHTML=`<span class="text-red-400">掃描規劃失敗：${err.message}</span>`;
+                } finally {
+                    btnAutoScanRoute.disabled=false;
+                    btnAutoScanRoute.textContent=oldText;
+                    btnAutoScanRoute.classList.remove('opacity-70');
+                }
+            },30);
+        }
+
+        btnAutoScanRoute.addEventListener('click', planAutomaticScanRoute);
 
         // ==========================================
         // 4. 多點路徑建立 / 編輯
