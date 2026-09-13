@@ -322,11 +322,16 @@
         let ledTemporalStrength = null;
         let ledTemporalW = 0, ledTemporalH = 0;
         let ledTemporalLastTime = 0;
+        let ledTemporalAnchorX = null, ledTemporalAnchorY = null;
         let ledLastRawPose = null;
         let ledLastRawTime = 0;
         const LED_TEMPORAL_MEMORY_MS = 220;
         const LED_TEMPORAL_THRESHOLD = 48;
         const LED_POSE_HOLD_MS = 420;
+        const LED_ARUCO_ROI_RADIUS_MARKERS = 3.2;
+        const LED_ARUCO_MAX_CACHE_SHIFT_MARKERS = 1.4;
+        const LED_LASTPOSE_ROI_PX = 110;
+        const LED_HEADING_CONTINUITY_DEG = 80;
 
         // --- 歷程紀錄變數 ---
         let commandHistory = [];
@@ -1067,7 +1072,7 @@
 
             let ledPose = null;
             if(visionMode !== 'aruco') {
-                ledPose = detectLedPose(rgba,pw,ph,scale);
+                ledPose = detectLedPose(rgba,pw,ph,scale,targetMarker);
                 if(ledPose) {
                     ledPose = smoothLedPose(ledPose);
                     drawLedPose(ledPose);
@@ -1125,50 +1130,120 @@
             ledTemporalW = 0;
             ledTemporalH = 0;
             ledTemporalLastTime = 0;
+            ledTemporalAnchorX = null;
+            ledTemporalAnchorY = null;
             ledLastRawPose = null;
             ledLastRawTime = 0;
         }
 
-        function detectLedPose(rgba,pw,ph,scale) {
+        function getLedArucoGuide(targetMarker, scale) {
+            if(!targetMarker || !targetMarker.corners) return null;
+            const pts=targetMarker.corners.map(p=>({x:p[0]*scale,y:p[1]*scale}));
+            const cx=(pts[0].x+pts[1].x+pts[2].x+pts[3].x)/4;
+            const cy=(pts[0].y+pts[1].y+pts[2].y+pts[3].y)/4;
+            let side=0;
+            for(let i=0;i<4;i++) {
+                const a=pts[i], b=pts[(i+1)%4];
+                side+=Math.hypot(a.x-b.x,a.y-b.y);
+            }
+            side=Math.max(8,side/4);
+            const fx=(pts[0].x+pts[1].x)/2, fy=(pts[0].y+pts[1].y)/2;
+            let hx=fx-cx, hy=fy-cy;
+            const hl=Math.hypot(hx,hy)||1; hx/=hl; hy/=hl;
+            return {cx,cy,side,heading:{x:hx,y:hy}};
+        }
+
+        function shiftLedTemporalBuffer(dx,dy,pw,ph) {
+            if(!ledTemporalStrength || (!dx && !dy)) return;
+            const shifted=new Uint8Array(ledTemporalStrength.length);
+            for(let y=0;y<ph;y++) {
+                const ny=y+dy;
+                if(ny<0 || ny>=ph) continue;
+                const row=y*pw, nrow=ny*pw;
+                for(let x=0;x<pw;x++) {
+                    const nx=x+dx;
+                    if(nx<0 || nx>=pw) continue;
+                    shifted[nrow+nx]=ledTemporalStrength[row+x];
+                }
+            }
+            ledTemporalStrength=shifted;
+        }
+
+        function detectLedPose(rgba,pw,ph,scale,targetMarker) {
             const now = performance.now();
             const rThreshold = Math.max(80, Math.min(250, +$('ledRThreshold').value || 140));
             const dominance = Math.max(10, Math.min(120, +$('ledDominance').value || 30));
             const pixelCount = pw * ph;
+            const guide = getLedArucoGuide(targetMarker, scale);
 
-            // 影像尺寸變更（例如手機旋轉、切換相機）時重新建立時間融合緩衝區。
             if(!ledTemporalStrength || ledTemporalW !== pw || ledTemporalH !== ph) {
                 ledTemporalStrength = new Uint8Array(pixelCount);
                 ledTemporalW = pw;
                 ledTemporalH = ph;
                 ledTemporalLastTime = now;
+                ledTemporalAnchorX = guide ? guide.cx : null;
+                ledTemporalAnchorY = guide ? guide.cy : null;
                 ledLastRawPose = null;
                 ledLastRawTime = 0;
             }
 
-            // 依實際經過時間衰減，而不是固定「幾幀」，所以 30/60 fps 都有相近效果。
+            // ArUco 可見時，讓時間殘影跟著車體平移，避免車一移動舊 LED 留在地板原座標。
+            if(guide) {
+                if(ledTemporalAnchorX !== null && ledTemporalAnchorY !== null) {
+                    const dx=guide.cx-ledTemporalAnchorX, dy=guide.cy-ledTemporalAnchorY;
+                    const jump=Math.hypot(dx,dy);
+                    if(jump > guide.side*LED_ARUCO_MAX_CACHE_SHIFT_MARKERS) {
+                        // 跳太大通常代表鏡頭/車體快速移動，舊殘影已不可信，直接清除。
+                        ledTemporalStrength.fill(0);
+                    } else if(jump >= 0.75) {
+                        shiftLedTemporalBuffer(Math.round(dx),Math.round(dy),pw,ph);
+                    }
+                }
+                ledTemporalAnchorX=guide.cx;
+                ledTemporalAnchorY=guide.cy;
+            } else {
+                ledTemporalAnchorX=null;
+                ledTemporalAnchorY=null;
+            }
+
             const dt = Math.max(1, Math.min(100, now - (ledTemporalLastTime || now)));
             ledTemporalLastTime = now;
             const decay = Math.max(1, Math.round(255 * dt / LED_TEMPORAL_MEMORY_MS));
+
+            // 搜尋區：有 ArUco 時只接受車子附近的紅光；LED-only 則在已鎖定後限制在上一位置附近。
+            let roiCx=null, roiCy=null, roiR=Infinity;
+            if(guide) {
+                roiCx=guide.cx; roiCy=guide.cy; roiR=guide.side*LED_ARUCO_ROI_RADIUS_MARKERS;
+            } else if(ledLastRawPose && now-ledLastRawTime < 1000) {
+                roiCx=ledLastRawPose.center.x*scale;
+                roiCy=ledLastRawPose.center.y*scale;
+                const span=(ledLastRawPose.patternSpan||40)*scale;
+                roiR=Math.max(LED_LASTPOSE_ROI_PX*scale, span*4.0, 35);
+            }
+            const roiR2=roiR*roiR;
 
             const temporalMask = new cv.Mat(ph,pw,cv.CV_8UC1);
             const md = temporalMask.data;
             const d = rgba.data;
 
             for(let i=0,j=0; i<d.length; i+=4,j++) {
+                const x=j%pw, y=(j/pw)|0;
+                const inRoi = roiCx===null || ((x-roiCx)*(x-roiCx)+(y-roiCy)*(y-roiCy) <= roiR2);
                 const r=d[i], g=d[i+1], b=d[i+2];
-                const isLedRed = r >= rThreshold && (r-g) >= dominance && (r-b) >= dominance;
+                const isLedRed = inRoi && r >= rThreshold && (r-g) >= dominance && (r-b) >= dominance;
 
                 if(isLedRed) {
-                    // 只要這一幀有看到，就把該像素充滿；下一些影格即使因掃描熄滅也會短暫保留。
                     ledTemporalStrength[j] = 255;
                 } else {
                     const v = ledTemporalStrength[j] - decay;
                     ledTemporalStrength[j] = v > 0 ? v : 0;
                 }
+
+                // ROI 外的舊紅光快速清掉，避免地板反射或紅色物件長時間殘留。
+                if(!inRoi) ledTemporalStrength[j]=0;
                 md[j] = ledTemporalStrength[j] >= LED_TEMPORAL_THRESHOLD ? 255 : 0;
             }
 
-            // 將同一列相鄰 LED 的光暈接起來。空白的第 3 列距離較大，所以前/後兩團仍會分開。
             const clean = new cv.Mat();
             let kSize = Math.round(Math.min(pw,ph) / 95);
             kSize = Math.max(3, Math.min(9, kSize));
@@ -1191,7 +1266,8 @@
                     if(Math.abs(m.m00)>1e-6) {
                         const rect=cv.boundingRect(cnt);
                         if(rect.width < pw*0.24 && rect.height < ph*0.24) {
-                            // 由二階矩估計團塊的長軸。車尾 5 顆一排（甚至只拍到其中一排）會形成很清楚的橫向長軸。
+                            const bx=m.m10/m.m00, by=m.m01/m.m00;
+                            if(roiCx!==null && (bx-roiCx)*(bx-roiCx)+(by-roiCy)*(by-roiCy)>roiR2) { cnt.delete(); continue; }
                             const cxx=Math.max(0,m.mu20/m.m00);
                             const cyy=Math.max(0,m.mu02/m.m00);
                             const cxy=m.mu11/m.m00;
@@ -1201,11 +1277,7 @@
                             const l2=Math.max(0,(tr-disc)/2);
                             const theta=0.5*Math.atan2(2*cxy,cxx-cyy);
                             blobs.push({
-                                x:m.m10/m.m00,
-                                y:m.m01/m.m00,
-                                area,
-                                rect,
-                                theta,
+                                x:bx,y:by,area,rect,theta,
                                 major:Math.max(2,4*Math.sqrt(l1)),
                                 minor:Math.max(1,4*Math.sqrt(l2))
                             });
@@ -1217,8 +1289,6 @@
 
             temporalMask.delete(); clean.delete(); kernel.delete(); cs.delete(); hh.delete();
 
-            // 不再要求「單一影格一定看齊所有 14 顆」。
-            // 從時間融合後的團塊中找：較小的前團 + 較大的後團。
             let best = null;
             for(let i=0;i<blobs.length;i++) {
                 for(let j=i+1;j<blobs.length;j++) {
@@ -1226,41 +1296,62 @@
                     if(front.area > rear.area) [front,rear] = [rear,front];
 
                     const ratio = rear.area / Math.max(1,front.area);
-                    if(ratio < 1.12 || ratio > 9.0) continue;
+                    if(ratio < 1.10 || ratio > 10.0) continue;
 
                     let hx=front.x-rear.x, hy=front.y-rear.y;
-                    const dist=Math.hypot(hx,hy);
-                    if(dist < Math.max(4,Math.min(pw,ph)*0.012)) continue;
-
-                    // 圖案幾何：兩團中心距離大約是車尾寬度的一部分，不應離得非常遠。
+                    const pairDist=Math.hypot(hx,hy);
+                    if(pairDist < Math.max(4,Math.min(pw,ph)*0.010)) continue;
                     const sizeRef=Math.max(rear.major,front.major,6);
-                    if(dist > Math.max(sizeRef*3.4,Math.min(pw,ph)*0.18)) continue;
-                    hx/=dist; hy/=dist;
-
-                    // 車尾團的長軸應大致與行進方向垂直。
-                    const rvx=Math.cos(rear.theta), rvy=Math.sin(rear.theta);
-                    const parallel=Math.abs(hx*rvx + hy*rvy); // 0 最佳，1 最差
-                    const perpendicularScore=1-parallel;
-
-                    // 完整圖案面積比約 10:4=2.5；掃描缺列時允許很大的彈性。
-                    const ratioScore=Math.max(0,1-Math.abs(Math.log(ratio/2.5))/Math.log(7));
-                    const widthScore=Math.max(0,Math.min(1,rear.major/Math.max(1,front.major)-0.85));
-                    let score=2.2*perpendicularScore + 1.5*ratioScore + 0.8*widthScore;
+                    if(pairDist > Math.max(sizeRef*3.1,Math.min(pw,ph)*0.13)) continue;
+                    hx/=pairDist; hy/=pairDist;
 
                     const cx=(front.x+rear.x)/2, cy=(front.y+rear.y)/2;
 
-                    // 已經鎖定後，偏好與上一個 LED 位置/方向連續的候選，避免紅色車殼或反光突然搶走追蹤。
+                    // 有 ArUco 時，候選中心必須真的在車身附近；越靠近越優先。
+                    let guideScore=0;
+                    if(guide) {
+                        const gd=Math.hypot(cx-guide.cx,cy-guide.cy);
+                        if(gd > roiR) continue;
+                        guideScore=Math.max(0,1.5-gd/(guide.side*2.2));
+
+                        // ArUco 只用來消除 180° 正反歧義：LED 的軸仍由 LED 自己算。
+                        const dotGuide=hx*guide.heading.x+hy*guide.heading.y;
+                        if(dotGuide < 0) {
+                            [front,rear]=[rear,front];
+                            hx=-hx; hy=-hy;
+                        }
+                    } else if(ledLastRawPose && now-ledLastRawTime < 900) {
+                        // LED-only：車在不到 1 秒內不可能瞬間反轉 180°，用上一可靠方向消歧義。
+                        const dotPrev=hx*ledLastRawPose.heading.x+hy*ledLastRawPose.heading.y;
+                        if(dotPrev < 0) {
+                            [front,rear]=[rear,front];
+                            hx=-hx; hy=-hy;
+                        }
+                    }
+
+                    const rvx=Math.cos(rear.theta), rvy=Math.sin(rear.theta);
+                    const parallel=Math.abs(hx*rvx + hy*rvy);
+                    const perpendicularScore=1-parallel;
+                    const ratioScore=Math.max(0,1-Math.abs(Math.log(ratio/2.5))/Math.log(7));
+                    const widthScore=Math.max(0,Math.min(1,rear.major/Math.max(1,front.major)-0.85));
+                    let score=2.2*perpendicularScore + 1.5*ratioScore + 0.8*widthScore + guideScore;
+
                     if(ledLastRawPose && now-ledLastRawTime < 900) {
                         const oldCx=ledLastRawPose.center.x*scale;
                         const oldCy=ledLastRawPose.center.y*scale;
                         const centerJump=Math.hypot(cx-oldCx,cy-oldCy);
-                        score += Math.max(0,1.5-centerJump/Math.max(15,dist*1.8));
+                        const allowedJump=guide ? guide.side*1.8 : Math.max(35,pairDist*2.5);
+                        if(centerJump > allowedJump) continue;
+                        score += Math.max(0,1.8-centerJump/Math.max(12,pairDist*1.5));
+
                         const oldHx=ledLastRawPose.heading.x, oldHy=ledLastRawPose.heading.y;
                         const dot=Math.max(-1,Math.min(1,hx*oldHx+hy*oldHy));
-                        score += 1.5*Math.max(0,dot);
+                        const maxTurnCos=Math.cos(LED_HEADING_CONTINUITY_DEG*Math.PI/180);
+                        if(dot < maxTurnCos && !guide) continue;
+                        score += 1.4*Math.max(0,dot);
                     }
 
-                    if(!best || score>best.score) best={front,rear,hx,hy,cx,cy,score,dist};
+                    if(!best || score>best.score) best={front,rear,hx,hy,cx,cy,score,pairDist};
                 }
             }
 
@@ -1270,9 +1361,10 @@
                     heading:{x:best.hx,y:best.hy},
                     front:{x:best.front.x/scale,y:best.front.y/scale},
                     rear:{x:best.rear.x/scale,y:best.rear.y/scale},
-                    source:'LED-temporal',
+                    patternSpan:best.pairDist/scale,
+                    source:guide?'LED-temporal-aruco-locked':'LED-temporal-tracked',
                     pointCount:blobs.length,
-                    confidence:Math.max(0,Math.min(1,best.score/5)),
+                    confidence:Math.max(0,Math.min(1,best.score/6)),
                     held:false
                 };
                 ledLastRawPose=pose;
@@ -1280,10 +1372,13 @@
                 return pose;
             }
 
-            // rolling shutter 若這一刻只拍到「前團」或「後團」，短時間沿用上一個可靠姿態，
-            // 不要讓導航因 1~數幀缺列就突然認為 LED 消失。
             if(ledLastRawPose && now-ledLastRawTime <= LED_POSE_HOLD_MS) {
                 const age=(now-ledLastRawTime)/LED_POSE_HOLD_MS;
+                // 有 ArUco 時，若上一個 LED 中心已離車太遠就不要 hold，避免錯誤位置被延續。
+                if(guide) {
+                    const oldCx=ledLastRawPose.center.x*scale, oldCy=ledLastRawPose.center.y*scale;
+                    if(Math.hypot(oldCx-guide.cx,oldCy-guide.cy) > guide.side*LED_ARUCO_ROI_RADIUS_MARKERS) return null;
+                }
                 return {
                     ...ledLastRawPose,
                     source:'LED-temporal-hold',
@@ -1298,8 +1393,11 @@
         function smoothLedPose(pose) {
             if(!lastLedPose) { lastLedPose=pose; return pose; }
             const a=LED_SMOOTH_ALPHA;
-            let hx=(1-a)*lastLedPose.heading.x+a*pose.heading.x;
-            let hy=(1-a)*lastLedPose.heading.y+a*pose.heading.y;
+            let phx=pose.heading.x, phy=pose.heading.y;
+            const dot=phx*lastLedPose.heading.x+phy*lastLedPose.heading.y;
+            if(dot < 0) { phx=-phx; phy=-phy; }
+            let hx=(1-a)*lastLedPose.heading.x+a*phx;
+            let hy=(1-a)*lastLedPose.heading.y+a*phy;
             const hl=Math.hypot(hx,hy)||1; hx/=hl; hy/=hl;
             const out={...pose,
                 center:{x:(1-a)*lastLedPose.center.x+a*pose.center.x,y:(1-a)*lastLedPose.center.y+a*pose.center.y},
