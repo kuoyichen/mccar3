@@ -333,6 +333,23 @@
         const LED_LASTPOSE_ROI_PX = 110;
         const LED_HEADING_CONTINUITY_DEG = 80;
 
+        // --- 新版 LED 車體座標鎖定追蹤 ---
+        // micro:bit LED 與 ArUco 固定在同一台車上；ArUco 可見時不再讓紅光自行決定全域位置/方向。
+        // 依實際安裝照片，LED 矩陣中心約在 ArUco 中心前方 1.62 個 marker 邊長。
+        let ledLastReliablePose = null;
+        let ledLastReliableTime = 0;
+        let ledLastGuide = null;
+        let ledLastGuideTime = 0;
+        let ledPresenceEma = 0;
+        const LED_MOUNT_FORWARD_MARKERS = 1.62;
+        const LED_MOUNT_SIDE_MARKERS = 0.03;
+        const LED_BOX_BACK_MARKERS = 0.72;
+        const LED_BOX_FRONT_MARKERS = 0.82;
+        const LED_BOX_HALF_WIDTH_MARKERS = 0.58;
+        const LED_GUIDE_HOLD_MS = 550;
+        const LED_RELIABLE_HOLD_MS = 500;
+        const LED_TRACK_AFTER_GUIDE_MS = 850;
+
         // --- 歷程紀錄變數 ---
         let commandHistory = [];
         let isRecording = false;
@@ -1134,6 +1151,11 @@
             ledTemporalAnchorY = null;
             ledLastRawPose = null;
             ledLastRawTime = 0;
+            ledLastReliablePose = null;
+            ledLastReliableTime = 0;
+            ledLastGuide = null;
+            ledLastGuideTime = 0;
+            ledPresenceEma = 0;
         }
 
         function getLedArucoGuide(targetMarker, scale) {
@@ -1150,7 +1172,9 @@
             const fx=(pts[0].x+pts[1].x)/2, fy=(pts[0].y+pts[1].y)/2;
             let hx=fx-cx, hy=fy-cy;
             const hl=Math.hypot(hx,hy)||1; hx/=hl; hy/=hl;
-            return {cx,cy,side,heading:{x:hx,y:hy}};
+            // right 與 heading 組成 marker/車體的 2D 局部座標。
+            const rx=-hy, ry=hx;
+            return {cx,cy,side,heading:{x:hx,y:hy},right:{x:rx,y:ry}};
         }
 
         function shiftLedTemporalBuffer(dx,dy,pw,ph) {
@@ -1169,7 +1193,167 @@
             ledTemporalStrength=shifted;
         }
 
+        function makeAnchoredLedPose(guide, scale, held=false, confidence=1, hitCount=0) {
+            const h=guide.heading, r=guide.right || {x:-h.y,y:h.x};
+            const cx = guide.cx + h.x*guide.side*LED_MOUNT_FORWARD_MARKERS + r.x*guide.side*LED_MOUNT_SIDE_MARKERS;
+            const cy = guide.cy + h.y*guide.side*LED_MOUNT_FORWARD_MARKERS + r.y*guide.side*LED_MOUNT_SIDE_MARKERS;
+            return {
+                center:{x:cx/scale,y:cy/scale},
+                heading:{x:h.x,y:h.y},
+                front:{x:(cx+h.x*guide.side*0.35)/scale,y:(cy+h.y*guide.side*0.35)/scale},
+                rear:{x:(cx-h.x*guide.side*0.35)/scale,y:(cy-h.y*guide.side*0.35)/scale},
+                patternSpan:(guide.side*0.70)/scale,
+                source:held?'LED-aruco-anchor-hold':'LED-aruco-anchor',
+                pointCount:hitCount,
+                confidence,
+                held,
+                arucoAnchored:true
+            };
+        }
+
+        function measureLedInGuideBox(rgba,pw,ph,guide) {
+            const rThreshold = Math.max(80, Math.min(250, +$('ledRThreshold').value || 140));
+            const dominance = Math.max(10, Math.min(120, +$('ledDominance').value || 30));
+            const d=rgba.data;
+            const h=guide.heading, rv=guide.right || {x:-h.y,y:h.x};
+
+            const centerU=LED_MOUNT_FORWARD_MARKERS;
+            const minU=centerU-LED_BOX_BACK_MARKERS;
+            const maxU=centerU+LED_BOX_FRONT_MARKERS;
+            const halfV=LED_BOX_HALF_WIDTH_MARKERS;
+
+            // 先算旋轉矩形四角的軸對齊 bounding box，避免掃整張影像。
+            const corners=[];
+            for(const u of [minU,maxU]) for(const v of [-halfV,halfV]) {
+                corners.push({
+                    x:guide.cx + guide.side*(h.x*u + rv.x*v),
+                    y:guide.cy + guide.side*(h.y*u + rv.y*v)
+                });
+            }
+            const x0=Math.max(0,Math.floor(Math.min(...corners.map(p=>p.x))-2));
+            const x1=Math.min(pw-1,Math.ceil(Math.max(...corners.map(p=>p.x))+2));
+            const y0=Math.max(0,Math.floor(Math.min(...corners.map(p=>p.y))-2));
+            const y1=Math.min(ph-1,Math.ceil(Math.max(...corners.map(p=>p.y))+2));
+
+            let hits=0, sumW=0, sumU=0, sumV=0;
+            for(let y=y0;y<=y1;y++) {
+                for(let x=x0;x<=x1;x++) {
+                    const dx=x-guide.cx, dy=y-guide.cy;
+                    const u=(dx*h.x+dy*h.y)/guide.side;
+                    const v=(dx*rv.x+dy*rv.y)/guide.side;
+                    if(u<minU || u>maxU || Math.abs(v)>halfV) continue;
+                    const j=y*pw+x, i=j*4;
+                    const rr=d[i], gg=d[i+1], bb=d[i+2];
+                    if(rr>=rThreshold && (rr-gg)>=dominance && (rr-bb)>=dominance) {
+                        // 越紅、越亮權重越高，降低暗紅車殼的影響。
+                        const w=1 + Math.max(0,(rr-Math.max(gg,bb))/80);
+                        hits++;
+                        sumW+=w; sumU+=u*w; sumV+=v*w;
+                    }
+                }
+            }
+
+            const boxArea=Math.max(1,(x1-x0+1)*(y1-y0+1));
+            const density=hits/boxArea;
+            return {
+                hits,density,
+                meanU:sumW?sumU/sumW:centerU,
+                meanV:sumW?sumV/sumW:0
+            };
+        }
+
+        function trackLedNearReliablePose(rgba,pw,ph,scale,pose) {
+            if(!pose) return null;
+            const d=rgba.data;
+            const rThreshold=Math.max(80,Math.min(250,+$('ledRThreshold').value||140));
+            const dominance=Math.max(10,Math.min(120,+$('ledDominance').value||30));
+            const cx=pose.center.x*scale, cy=pose.center.y*scale;
+            const span=Math.max(18,(pose.patternSpan||45)*scale);
+            const radius=Math.max(24,span*1.35), r2=radius*radius;
+            const x0=Math.max(0,Math.floor(cx-radius)), x1=Math.min(pw-1,Math.ceil(cx+radius));
+            const y0=Math.max(0,Math.floor(cy-radius)), y1=Math.min(ph-1,Math.ceil(cy+radius));
+            let hits=0,sx=0,sy=0;
+            for(let y=y0;y<=y1;y++) for(let x=x0;x<=x1;x++) {
+                const dx=x-cx,dy=y-cy; if(dx*dx+dy*dy>r2) continue;
+                const j=y*pw+x,i=j*4, rr=d[i],gg=d[i+1],bb=d[i+2];
+                if(rr>=rThreshold && (rr-gg)>=dominance && (rr-bb)>=dominance) {
+                    hits++; sx+=x; sy+=y;
+                }
+            }
+            if(hits<4) return null;
+            const mx=sx/hits,my=sy/hits;
+            const jump=Math.hypot(mx-cx,my-cy);
+            if(jump>radius*0.62) return null;
+            // 暫時沒有 ArUco 時只允許小幅平移，方向保持最後可靠值，不讓 partial scan 亂翻方向。
+            const a=0.28;
+            return {
+                ...pose,
+                center:{x:((1-a)*cx+a*mx)/scale,y:((1-a)*cy+a*my)/scale},
+                source:'LED-local-track',
+                pointCount:hits,
+                confidence:Math.max(0.25,Math.min(0.85,hits/35)),
+                held:false,
+                arucoAnchored:false
+            };
+        }
+
         function detectLedPose(rgba,pw,ph,scale,targetMarker) {
+            const now=performance.now();
+            const currentGuide=getLedArucoGuide(targetMarker,scale);
+
+            if(currentGuide) {
+                ledLastGuide=currentGuide;
+                ledLastGuideTime=now;
+                const m=measureLedInGuideBox(rgba,pw,ph,currentGuide);
+
+                // 以 EMA 吸收 micro:bit multiplex/rolling-shutter：某一幀缺列不會立即掉鎖。
+                const instant=Math.min(1,m.density/0.020);
+                ledPresenceEma=ledPresenceEma*0.72+instant*0.28;
+                const minHits=Math.max(3,Math.round(currentGuide.side*currentGuide.side*0.0012));
+                const visible=m.hits>=minHits || ledPresenceEma>=0.12;
+
+                if(visible) {
+                    const conf=Math.max(0.35,Math.min(1,0.45+ledPresenceEma*0.55));
+                    const pose=makeAnchoredLedPose(currentGuide,scale,false,conf,m.hits);
+                    ledLastReliablePose=pose;
+                    ledLastReliableTime=now;
+                    // 清除舊版全域 temporal buffer，避免之後 fallback 帶入地板殘影。
+                    if(ledTemporalStrength) ledTemporalStrength.fill(0);
+                    return pose;
+                }
+
+                // ArUco 還在，但剛好這一幀 LED 掃描為暗：短暫維持「跟車走」的 anchored pose。
+                if(ledLastReliablePose && now-ledLastReliableTime<=LED_RELIABLE_HOLD_MS) {
+                    return makeAnchoredLedPose(currentGuide,scale,true,
+                        Math.max(0.2,ledLastReliablePose.confidence*0.82),0);
+                }
+                return null;
+            }
+
+            // ArUco 短暫漏掉時，不准重新在全畫面找 LED；只在上一個可靠 LED 附近追蹤。
+            // 這條規則直接禁止 LED 跳到地板、腳、反光點等遠處。
+            if(visionMode==='both') {
+                if(ledLastReliablePose && now-ledLastReliableTime<=LED_TRACK_AFTER_GUIDE_MS) {
+                    const tracked=trackLedNearReliablePose(rgba,pw,ph,scale,ledLastReliablePose);
+                    if(tracked) {
+                        ledLastReliablePose=tracked;
+                        ledLastReliableTime=now;
+                        return tracked;
+                    }
+                    if(now-ledLastReliableTime<=LED_RELIABLE_HOLD_MS) {
+                        return {...ledLastReliablePose,source:'LED-local-hold',held:true,
+                            confidence:Math.max(0.18,ledLastReliablePose.confidence*0.75)};
+                    }
+                }
+                return null;
+            }
+
+            // 真正「僅 LED」模式才允許使用原本的獨立 LED 圖形搜尋。
+            // 一旦鎖定後，舊演算法本身仍有位置/方向連續性限制。
+            return detectLedPoseLegacy(rgba,pw,ph,scale,null);
+        }
+
+        function detectLedPoseLegacy(rgba,pw,ph,scale,targetMarker) {
             const now = performance.now();
             const rThreshold = Math.max(80, Math.min(250, +$('ledRThreshold').value || 140));
             const dominance = Math.max(10, Math.min(120, +$('ledDominance').value || 30));
@@ -1392,10 +1576,11 @@
 
         function smoothLedPose(pose) {
             if(!lastLedPose) { lastLedPose=pose; return pose; }
-            const a=LED_SMOOTH_ALPHA;
+            const a=pose.arucoAnchored ? 0.72 : LED_SMOOTH_ALPHA;
             let phx=pose.heading.x, phy=pose.heading.y;
             const dot=phx*lastLedPose.heading.x+phy*lastLedPose.heading.y;
-            if(dot < 0) { phx=-phx; phy=-phy; }
+            // ArUco anchored 已經完成正反消歧義，絕不能因「上一個錯誤 LED 方向」再翻回 180°。
+            if(!pose.arucoAnchored && dot < 0) { phx=-phx; phy=-phy; }
             let hx=(1-a)*lastLedPose.heading.x+a*phx;
             let hy=(1-a)*lastLedPose.heading.y+a*phy;
             const hl=Math.hypot(hx,hy)||1; hx/=hl; hy/=hl;
